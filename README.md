@@ -7,9 +7,9 @@
 > 重点是**检索质量**：单一检索方式都有盲区，词法看词面、向量看语义，**混合 + 重排**是业界最扎实的组合。
 > 检索后端全部藏在一个 `Retriever` 协议后面、**可替换**，换后端时上层（生成 / 评测）一行不动。
 
-> **项目沿革**：本仓库早期是一个 **agentic RAG**（模型自己决定该不该查 / 查几次 / 何时停）+「agentic vs 单次」对比实验，
-> 已完整冻结在 git tag **`v1-agentic-comparison`**（`git checkout v1-agentic-comparison` 可复现）。当前 `master` 聚焦
-> **检索流水线**方向。
+> **两条路并存**：`master` 上既有**单次强检索流水线**（`run.py` / `eval_rag.py`），也保留了 **agentic RAG**
+> （`run_agentic.py`：模型自己决定该不该查 / 查几次 / 何时停）——两者共用同一套 `Retriever` 协议，是正交、互补的做法。
+> 最初的「agentic vs 单次」对比实验另冻结在 tag **`v1-agentic-comparison`**（`git checkout` 可复现）。
 
 ---
 
@@ -35,7 +35,7 @@ RAG = **检索(retrieve) → 拼上下文(augment) → 生成(generate)**。**�
 ```
 agentic-rag/
 ├── README.md            # 本文件
-├── requirements.txt     # 依赖：sentence-transformers / rank-bm25 / openevals / langchain-openai / langsmith
+├── requirements.txt     # 依赖：sentence-transformers / rank-bm25 / openevals / langchain-openai / langgraph / langsmith
 ├── .env.example         # 配置模板（复制成 .env 填真实值）
 ├── .env                 # 真实密钥（已 gitignore；模型 + LangSmith 凭据）
 │
@@ -50,10 +50,17 @@ agentic-rag/
 ├── rag.py               # answer：检索 → 一次 grounded 生成（带 [source:] 引用）
 ├── run.py               # CLI：对一个问题跑 hybrid 检索（可选生成），打印排名
 │
+│  ── agentic RAG（与流水线并存，正交的另一条路）──
+├── prompts.py           # 四条 agentic 策略（该不该查 / 查几次 / 何时停 / 别幻觉）
+├── tools.py             # rag_search：暴露给模型的唯一工具
+├── agent.py             # create_react_agent 的 agentic loop（复用 llm.py）
+├── run_agentic.py       # CLI：跑 agentic 检索，逐步打印每次改写 / 停
+│
 │  ── 语料 + 评测 ──
 ├── corpus_multihop.py   # 加载 data/ 的 MultiHop-RAG（609 篇 → 6194 片段 + 2556 问）
 ├── eval_dataset.py      # Example 数据类（评测样例的共享类型）
 ├── eval_rag.py          # openevals 4 个 LLM-judge + 可 --upload 推 LangSmith
+├── langsmith_upload.py  # 把全量 MultiHop-RAG（含 gold 证据 fact）传成 LangSmith 数据集
 └── data/                # ← MultiHop-RAG 语料（已 gitignore；见「第三节」）
     ├── corpus.json          # 609 篇新闻全文
     └── MultiHopRAG.json     # 2556 个多跳问题 + gold 证据
@@ -104,6 +111,12 @@ python run.py --no-gen "..."           # 只看检索排名，不调生成模型
 # 3) LLM-judge 评测（openevals，judge=模型；--upload 另推 LangSmith）
 python eval_rag.py --n 8                # 本地打分表
 python eval_rag.py --n 8 --upload       # 同上 + 推 dataset + experiment 到 LangSmith
+
+# 4) agentic RAG —— 另一条路：模型自己决定查不查 / 多跳 / 何时停
+python run_agentic.py "Who is the individual ... facing a criminal trial?"
+
+# 5) 把全量数据集（含 gold 证据）传到 LangSmith（免费，不调模型）
+python langsmith_upload.py               # 2556 题 → 数据集 multihop-rag
 ```
 
 > **网关提示**：某些中转网关 WAF 拦未知 UA → 设 `RAG_USER_AGENT`；偶发 5xx/超时 → `RAG_MAX_RETRIES` / `RAG_TIMEOUT`（`build_model` 已读取）。
@@ -131,7 +144,7 @@ class Retriever(Protocol):
 
 1. **召回**：BM25、Dense 各取 top-`pool`(默认 20)。
 2. **融合**：各自分数 **min-max 归一化后按权重相加**（默认 `w_bm25 = w_dense = 0.5`）；同一片段两边都命中则叠加。
-3. **重排**：融合候选池丢给 `bge-reranker-base`（cross-encoder），按 (query, passage) 相关性取 top-k。
+3. **重排**：融合候选池丢给 `bge-reranker-v2-m3`（cross-encoder），按 (query, passage) 相关性取 top-k。
 
 > 想调：`HybridRetriever(docs, w_bm25=.3, w_dense=.7, pool=30)`。默认已用 `bge-large-en-v1.5`（1024 维）+ `bge-reranker-v2-m3`（GPU 上跑）；无显卡的机器可在 `retriever_dense.py` / `retriever_hybrid.py` 改回 `bge-small-en-v1.5` / `bge-reranker-base`。
 
@@ -182,7 +195,7 @@ class Retriever(Protocol):
 - **换更大的模型在这 6 题上没有可辨识的提升**——groundedness 两组都 ~1.0，其余差异**全在噪声内**（就一道题从满分翻成失败，均值被拉低 0.15+）。
 - 原因：n=6 太小 + LLM-judge（grok）**不完全可复现**；而且「更大的模型 ≠ 每条 query 都更好」，检索质量是**逐 query** 的。
 - **结论**：要真分辨模型 / 参数好坏，得把 `--n` 拉到 **20~30+** 才有统计意义——这本身是个诚实的工程教训。
-- 唯一稳的信号：**不管大小模型，grounded 生成 + `[source:]` 纪律把幻觉压到近 0**；失败集中在「证据分散多篇」的难多跳——正是被冻结的 agentic 多跳版本（tag `v1-agentic-comparison`）要补的地方。**强检索与 agentic 多跳正交、互补。**
+- 唯一稳的信号：**不管大小模型，grounded 生成 + `[source:]` 纪律把幻觉压到近 0**；失败集中在「证据分散多篇」的难多跳——正是并存的 agentic 多跳（`run_agentic.py`）要补的地方。**强检索与 agentic 多跳正交、互补。**
 
 > 复现：`python eval_rag.py --n 6`（`--n 30` 才够分辨模型差异；加 `--upload` 推 LangSmith）。
 
@@ -194,7 +207,8 @@ class Retriever(Protocol):
 - **LLM-judge 评测（✅）**：openevals 四轴（correctness / groundedness / retrieval_relevance / helpfulness），judge=网关模型，可 `--upload` 到 LangSmith。
 - **调优（可选）**：融合权重（`w_bm25/w_dense`）/ `pool` 大小的消融对比（编码 / 重排已上 `bge-large-en-v1.5` + `bge-reranker-v2-m3`，GPU）。
 - **向量库（可选）**：`DenseRetriever` 现为内存 numpy 余弦；数据量大时可换 chroma / faiss（同协议、上层不动）。
-- **历史归档**：agentic 过程层 + 「agentic vs 单次」对比在 tag `v1-agentic-comparison`。
+- **agentic RAG（并存 ✅）**：`run_agentic.py`（create_react_agent，四策略），与流水线共用 `Retriever` 协议；最初的「agentic vs 单次」对比在 tag `v1-agentic-comparison`。
+- **历史归档**：自研确定性指标 + agentic-vs-单次对比脚本仍在 tag `v1-agentic-comparison`（未搬回 master）。
 
 ---
 
@@ -203,4 +217,4 @@ class Retriever(Protocol):
 > 「RAG 的上限在检索，不在生成。所以我搭了一条生产级检索栈：**BM25 词法 + bge 向量加权融合**把两种召回的盲区互补，
 > 再用 **cross-encoder 重排**精排——召回和精度分两步拿。后端全在一个 `Retriever` 协议后面可替换。评测我用 **openevals 的
 > LLM-as-judge**（correctness / 忠实度 / 检索相关性 / helpfulness），裁判走网关模型，一键推 **LangSmith** 做实验追踪。
-> 这个项目还有个 agentic 前身（模型自己决定查不查、多跳、何时停），冻结在一个 tag 里——**我知道 agentic 和强检索是两条正交的路，也知道各自该怎么量化。**」
+> 这个项目还**并存**着一个 agentic RAG（`run_agentic.py`：模型自己决定查不查、多跳、何时停）——**我知道 agentic 和强检索是两条正交、互补的路，也知道各自该怎么量化。**」
