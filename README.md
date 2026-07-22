@@ -53,7 +53,7 @@ agentic-rag/
 │  ── agentic RAG（与流水线并存，正交的另一条路）──
 ├── prompts.py           # 四条 agentic 策略（该不该查 / 查几次 / 何时停 / 别幻觉）
 ├── tools.py             # rag_search：暴露给模型的唯一工具
-├── agent.py             # create_react_agent 的 agentic loop（复用 llm.py）
+├── agent.py             # create_agent 的 agentic loop（复用 llm.py）
 ├── run_agentic.py       # CLI：跑 agentic 检索，逐步打印每次改写 / 停
 │
 │  ── 语料 + 评测 ──
@@ -207,7 +207,7 @@ class Retriever(Protocol):
 - **LLM-judge 评测（✅）**：openevals 四轴（correctness / groundedness / retrieval_relevance / helpfulness），judge=网关模型，可 `--upload` 到 LangSmith。
 - **调优（可选）**：融合权重（`w_bm25/w_dense`）/ `pool` 大小的消融对比（编码 / 重排已上 `bge-large-en-v1.5` + `bge-reranker-v2-m3`，GPU）。
 - **向量库（可选）**：`DenseRetriever` 现为内存 numpy 余弦；数据量大时可换 chroma / faiss（同协议、上层不动）。
-- **agentic RAG（并存 ✅）**：`run_agentic.py`（create_react_agent，四策略），与流水线共用 `Retriever` 协议；最初的「agentic vs 单次」对比在 tag `v1-agentic-comparison`。
+- **agentic RAG（并存 ✅）**：`run_agentic.py`（create_agent，四策略），与流水线共用 `Retriever` 协议；最初的「agentic vs 单次」对比在 tag `v1-agentic-comparison`。
 - **历史归档**：自研确定性指标 + agentic-vs-单次对比脚本仍在 tag `v1-agentic-comparison`（未搬回 master）。
 
 ---
