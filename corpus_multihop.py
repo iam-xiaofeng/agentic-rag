@@ -47,7 +47,7 @@ def load_corpus(path: str | pathlib.Path | None = None) -> list[Doc]:
         title = (a.get("title") or a.get("url") or "untitled").strip()
         for j, ck in enumerate(_chunks(a.get("body") or "")):
             # 每个片段都拼上标题，让标题里的实体词在任何片段中都可被检索到
-            docs.append(Doc(id=f"{title}#{j}", text=f"{title}\n{ck}", source=(a.get("source") or "")))
+            docs.append(Doc(id=f"{title}#{j}", text=f"{title}\n{ck}", source=title))
     return docs
 
 

@@ -1,9 +1,15 @@
-langgraph>=0.2
-langchain-openai>=0.2
-langchain-core>=0.3
-langsmith>=0.1
-python-dotenv>=1.0    # 启动时把 .env 读进 os.environ（见 agent.py）
-rank-bm25>=0.2        # P3 真实语料的 BM25 检索后端（retriever_bm25.py）
+# 生成端 + 密钥（llm.py）/ LLM-judge 裁判
+langchain-openai>=1.0
+langchain-core>=1.0
 
-# P2 (eval):  ragas  datasets
-# P3 (real corpus):  chromadb  sentence-transformers
+# 检索栈：词法 + 稠密向量 + 交叉编码重排（retriever_*.py）
+rank-bm25>=0.2                 # BM25 词法腿
+sentence-transformers>=3.0     # bge 向量 + bge-reranker 重排（本地，拉 torch）
+numpy>=1.24                    # 分数归一化 / 加权融合
+
+# 评测：openevals LLM-as-judge + 推 LangSmith（eval_rag.py）
+openevals>=0.2
+langsmith>=0.1
+
+# 启动时把 .env 读进 os.environ（llm.py）
+python-dotenv>=1.0

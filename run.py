@@ -1,38 +1,45 @@
-"""CLI：在真实语料（MultiHop-RAG，BM25 检索）上提一个问题，观察 agentic 检索过程。
+"""CLI：在真实语料（MultiHop-RAG）上跑 hybrid 检索（BM25 + bge 向量 + reranker），可选生成答案。
 
-    python run.py "Who is the individual associated with the cryptocurrency industry facing a criminal trial?"
+    python run.py "Who is Sam Bankman-Fried?"     # 检索 + grounded 生成
+    python run.py --topk 8 "..."                  # 看更多候选
+    python run.py --no-gen "..."                  # 只看检索排序，不调模型
 
-打印的 "rag_search #N" 行 + 末尾计数，让你直接**看见过程层**：检索了几次、怎么改写的、
-什么时候决定停。
-
-首次运行会在约 6194 个语料片段上建 BM25 索引（几秒）。完整逐步 trace（每次工具调用、
-延迟、token）在设了 LANGSMITH_TRACING=true 和 LANGSMITH_API_KEY 时会出现在 LangSmith。
+首次运行会下 bge 模型并对 ~6194 个片段编码（之后走 .cache 缓存，秒级）。
 """
 
 from __future__ import annotations
 
+import argparse
 import sys
 
-from agent import build_agent
 from corpus_multihop import load_corpus
-from retriever_bm25 import BM25Retriever
+from retriever_hybrid import HybridRetriever
 
 
 def main() -> None:
-    question = " ".join(sys.argv[1:]).strip() or input("Q: ").strip()
-    print("构建 BM25 索引（MultiHop-RAG 语料）...", file=sys.stderr)
-    agent = build_agent(BM25Retriever(load_corpus()))
+    ap = argparse.ArgumentParser(description="hybrid(BM25+bge)+reranker 检索流水线")
+    ap.add_argument("question", nargs="+", help="要问的问题")
+    ap.add_argument("--topk", type=int, default=4, help="返回片段数（默认 4）")
+    ap.add_argument("--no-gen", action="store_true", help="只检索、不调模型生成")
+    args = ap.parse_args()
+    question = " ".join(args.question).strip()
 
-    n_search = 0
-    for chunk in agent.stream({"messages": [("user", question)]}, stream_mode="values"):
-        msg = chunk["messages"][-1]
-        for tc in getattr(msg, "tool_calls", None) or []:
-            if tc["name"] == "rag_search":
-                n_search += 1
-                print(f"  ↳ rag_search #{n_search}: {tc['args'].get('query')!r}")
-        msg.pretty_print()
+    print("构建 hybrid 索引（BM25 + bge 向量 + reranker；首次会下模型 / 编码语料）...", file=sys.stderr)
+    retriever = HybridRetriever(load_corpus())
+    hits = retriever.search(question, k=args.topk)
 
-    print(f"\n[过程] 本次 rag_search 调用次数: {n_search}")
+    print(f"\n=== 检索 top-{args.topk}（reranker 相关性分）===")
+    for i, h in enumerate(hits, 1):
+        print(f"{i:>2}. {h.score:6.2f}  {h.doc.source}")
+
+    if args.no_gen:
+        return
+
+    from rag import answer
+
+    print("\n=== grounded 生成（需模型 key）===", file=sys.stderr)
+    out = answer(question, retriever, k=args.topk, hits=hits)
+    print(out["answer"])
 
 
 if __name__ == "__main__":

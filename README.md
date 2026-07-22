@@ -1,28 +1,32 @@
-# agentic-rag · 过程层优先的 Agentic RAG（可跑 · 可评测）
+# 混合检索 RAG 流水线 · BM25 + bge 向量 + 交叉编码重排 · LLM-as-judge 评测
 
-> 一个**面试可讲、可跑、可评测**的 agentic RAG 最小实现。
-> **重点不是「建库」，而是 agentic 过程层**：模型自己决定 **该不该查 / 查几次 / 会不会停 / 值不值（别幻觉）**。
-> 检索后端藏在一个协议后面、**可替换**：真实语料（BM25 词法）→ 稠密向量（bge，待做），换后端时上层一行不动。
+> 一个**面试可讲、可跑、可评测**的生产级 RAG **检索流水线**：
+> **召回**（BM25 词法 + bge 稠密向量，加权融合）→ **重排**（bge-reranker 交叉编码）→ **生成**（grounded、带引用）
+> → **评测**（openevals 的 LLM-as-judge，可一键推 LangSmith）。
 >
-> 这份 README 力求**自包含**：读完它，你应该能了解本项目的每个文件、`data/` 里是什么、怎么跑、评测怎么设计、
-> 实测结果如何、以及怎么迁进 SlotFlow。
+> 重点是**检索质量**：单一检索方式都有盲区，词法看词面、向量看语义，**混合 + 重排**是业界最扎实的组合。
+> 检索后端全部藏在一个 `Retriever` 协议后面、**可替换**，换后端时上层（生成 / 评测）一行不动。
+
+> **项目沿革**：本仓库早期是一个 **agentic RAG**（模型自己决定该不该查 / 查几次 / 何时停）+「agentic vs 单次」对比实验，
+> 已完整冻结在 git tag **`v1-agentic-comparison`**（`git checkout v1-agentic-comparison` 可复现）。当前 `master` 聚焦
+> **检索流水线**方向。
 
 ---
 
 ## 一、为什么这么设计（核心动机）
 
-RAG = **检索(retrieve) → 拼上下文(augment) → 生成(generate)**。它有两段：
+RAG = **检索(retrieve) → 拼上下文(augment) → 生成(generate)**。**答案质量的上限，几乎全由检索决定**——
+检索不到，再强的模型也只能幻觉。所以本项目把功夫下在检索侧，用业界公认最稳的三段式：
 
-- 🏗️ **建库/索引**（chunk → embed → 存）—— 离线基础设施，**不是 agent 工具**。
-- 🔍 **检索**（`rag_search`）—— **唯一暴露给模型的工具**。
+1. 🔤 **词法召回（BM25）**——看**词面重叠**。命中精确实体 / 稀有词很强，但换个说法就抓瞎。
+2. 🧠 **向量召回（bge dense）**——看**语义相近**。措辞不同也能召回，但对精确实体 / 数字不敏感。
+3. 🎯 **交叉编码重排（bge-reranker）**——把 (query, passage) **一起**读，算一个比双塔向量更准的相关性分。贵，所以只重排少量候选。
 
-**「agentic」的价值全在检索这一侧的决策链**，不在建库。所以本项目**先把过程层做扎实**，把语料/索引这个重活
-**解耦**在一个协议后面：`Retriever` 是个 interface，当前后端是真实语料上的 **`BM25Retriever`**（词法检索），
-将来可升级 `VectorRetriever`（chroma + bge）—— **每次只换后端，工具/agent/评测都不动**。
+> **为什么两路召回要融合、还要重排**：词法和向量的盲区**互补**——加权融合先把两种「看法」的候选并起来（提召回），
+> 再用 cross-encoder 精排（提精度）。这就是 “hybrid retrieval + reranking” 成为生产标配的原因。
 
-> **为什么用 BM25 词法、而不是一上来就上向量**：词法检索**看词面**，跨跳的措辞差异让单次查询天然「欠覆盖」证据链——
-> 正好逼模型改写 query、多跳检索，**过程层行为才可观测、可评**。向量检索一次 top-k 常把分散证据一把糊上来，
-> 反而**看不出 agentic**。（这也是本项目早期用一个「故意做笨的关键词玩具库」做冒烟的原因，现已并入真实语料。）
+检索后端解耦在 `Retriever` 协议后面：当前实现 `BM25Retriever` / `DenseRetriever` / `HybridRetriever` 三个后端，
+**同一套接口**，`rag.py`（生成）和 `eval_rag.py`（评测）对换后端无感。
 
 ---
 
@@ -30,128 +34,54 @@ RAG = **检索(retrieve) → 拼上下文(augment) → 生成(generate)**。它�
 
 ```
 agentic-rag/
-├── README.md            # 本文件（完整说明）
-├── requirements.txt     # 依赖：langchain-openai / langgraph / rank-bm25 / python-dotenv / langsmith
-├── .env.example         # 配置模板（复制成 .env 填真实值；真 key 别写这里）
-├── .env                 # 真实密钥（已 gitignore，不提交；模型 + LangSmith 凭据）
+├── README.md            # 本文件
+├── requirements.txt     # 依赖：sentence-transformers / rank-bm25 / openevals / langchain-openai / langsmith
+├── .env.example         # 配置模板（复制成 .env 填真实值）
+├── .env                 # 真实密钥（已 gitignore；模型 + LangSmith 凭据）
 │
-│  ── 核心：工具 + 检索接口 + agentic loop ──
-├── retriever.py         # Retriever 协议 + Doc/Hit 数据类（检索后端的地基）
-├── retriever_bm25.py    # BM25Retriever：真实语料词法检索（实现 Retriever 协议，零重依赖、无 torch）
-├── tools.py             # rag_search：唯一暴露给模型的工具（query → 带 [source:] 引用的片段）
-├── prompts.py           # 系统提示 = agentic 四条策略（过程层写在这一处，不是硬编码控制流）
-├── agent.py             # create_react_agent：model →(rag_search → model)* → stop；含 build_model + .env 自动加载
-├── run.py               # CLI：在真实语料上提一个问题，逐步打印每次检索 / 改写 / 停
+│  ── 检索栈（核心）：一个协议 + 三个后端 ──
+├── retriever.py         # Retriever 协议 + Doc/Hit 数据类（后端地基）
+├── retriever_bm25.py    # BM25Retriever：词法检索（rank_bm25，零重依赖）
+├── retriever_dense.py   # DenseRetriever：bge 向量检索（sentence-transformers，向量缓存到 .cache/）
+├── retriever_hybrid.py  # HybridRetriever：BM25+向量 加权融合 → bge-reranker 重排（★ 新核心）
+│
+│  ── 生成 + 运行 ──
+├── llm.py               # build_model：OpenAI 兼容 chat 模型（grok/glm/…）+ .env 自动加载
+├── rag.py               # answer：检索 → 一次 grounded 生成（带 [source:] 引用）
+├── run.py               # CLI：对一个问题跑 hybrid 检索（可选生成），打印排名
 │
 │  ── 语料 + 评测 ──
 ├── corpus_multihop.py   # 加载 data/ 的 MultiHop-RAG（609 篇 → 6194 片段 + 2556 问）
 ├── eval_dataset.py      # Example 数据类（评测样例的共享类型）
-├── eval_baseline.py     # single_shot：检索一次答一次（非 agentic 对照组）
-├── eval_metrics.py      # 确定性指标：correct / faithful / hit / discipline
-├── eval_multihop.py     # 真实语料上 agentic vs 单次 + coverage；含 run_agentic + 可 --langsmith 推送
-└── data/                # ← MultiHop-RAG 语料，见「第三节 data/ 详解」（已 gitignore）
+├── eval_rag.py          # openevals 4 个 LLM-judge + 可 --upload 推 LangSmith
+└── data/                # ← MultiHop-RAG 语料（已 gitignore；见「第三节」）
     ├── corpus.json          # 609 篇新闻全文
     └── MultiHopRAG.json     # 2556 个多跳问题 + gold 证据
 ```
 
 ---
 
-## 三、`data/` 详解（这里到底是什么）
+## 三、`data/` 详解（这里是什么）
 
 `data/` 放的是 **MultiHop-RAG** —— 一个**多跳 RAG 评测基准**，自带语料 + 问题 + gold 证据。
-我们用它证明「在真实、装不下上下文的语料上，agentic 多跳检索确实比单次强」。
 
-- **来源**：HuggingFace 数据集 [`yixuantt/MultiHopRAG`](https://huggingface.co/datasets/yixuantt/MultiHopRAG)（配套论文 *MultiHop-RAG*，2024）。
-- **许可**：ODC-BY（开放、允许使用，署名即可）。
-- **为什么选它**：① 证据被**故意分散在 2~4 篇文章**里 → 单次检索结构上必然「欠覆盖」→ 正是 agentic 迭代该赢的地方；
-  ② **自带语料 + gold 证据**（不用自己去爬维基）；③ 只有 609 篇，**笔记本几分钟建完索引**。
-- **是否入库**：`data/` 已在 `.gitignore`，**不提交**（12 MB 语料不该进 git；下面给一键下载命令）。
+- **来源**：HuggingFace [`yixuantt/MultiHopRAG`](https://huggingface.co/datasets/yixuantt/MultiHopRAG)（论文 *MultiHop-RAG*, 2024）；许可 **ODC-BY**（公开、署名即可）。
+- **为什么选它**：证据被**故意分散在 2~4 篇文章**里 → 对检索的召回是真实压力测试；自带 gold 证据；只有 609 篇，笔记本几分钟建完索引。
+- **两个文件**：
+  - `corpus.json`：609 篇新闻（`title` 标题 / `body` 正文 / `source` 媒体 / …）——**被检索的语料**。
+  - `MultiHopRAG.json`：2556 个问题（`query` / `answer` 标准答案 / `question_type` / `evidence_list` gold 证据）——**评测集**。
+- **我们怎么用**（`corpus_multihop.py`）：
+  - `load_corpus()`：每篇 `body` 按 **1200 字符 / 重叠 150** 切块、拼上标题 → **6194 个 `Doc`**（`source = 文章标题`，与 gold 证据标题对齐）。
+  - `load_examples()`：每个问题 → 一条 `Example`（`question` / `reference=answer` / `sources=gold 标题` / `kind`）。
 
-### 3.1 两个文件
-
-| 文件 | 大小 | 内容 | 顶层结构 |
-|---|---|---|---|
-| `corpus.json` | ~6.6 MB | **609 篇新闻全文**（被检索的语料） | 一个 JSON 数组，每元素 = 一篇文章 |
-| `MultiHopRAG.json` | ~5.0 MB | **2556 个多跳问题** + 每问的 gold 证据 | 一个 JSON 数组，每元素 = 一个问题 |
-
-### 3.2 `corpus.json`（语料 = 被检索对象）
-
-每篇文章字段：
-
-| 字段 | 含义 |
-|---|---|
-| `title` | 标题 —— **我们用它当「来源 id」**（gold 证据也用 title 对齐，便于算 hit / coverage） |
-| `body` | 正文全文（真正被切块检索的内容；长度 min 4770 / 中位 **7836** / max 71034 字符） |
-| `source` | 媒体来源（如 Mashable、CNBC、TechCrunch…） |
-| `author` / `published_at` / `category` / `url` | 作者 / 发布时间 / 分类 / 原文链接（元数据，本项目未直接用） |
-
-真实样本（截断）：
-
-```json
-{
-  "title": "200+ of the best deals from Amazon's Cyber Monday sale",
-  "author": null,
-  "source": "Mashable",
-  "published_at": "2023-11-27T08:45:59+00:00",
-  "category": "entertainment",
-  "url": "https://mashable.com/article/cyber-monday-deals-amazon-2023",
-  "body": "Table of Contents ... （全文约数千字）"
-}
-```
-
-### 3.3 `MultiHopRAG.json`（问题 + gold 证据 = 评测标准答案）
-
-每个问题字段：
-
-| 字段 | 含义 |
-|---|---|
-| `query` | 多跳问题 |
-| `answer` | 标准答案（短，如 `"Sam Bankman-Fried"`；我们用**子串匹配**判 `correct`） |
-| `question_type` | 问题类型（见下表；`null_query` = 语料里查不到 → 我们当 negative） |
-| `evidence_list` | **gold 证据数组**（2~4 条），每条含 `title`（哪篇文章）+ `fact`（支撑句）等 |
-
-真实样本（截断）：
-
-```json
-{
-  "query": "Who is the individual associated with the cryptocurrency industry facing a criminal trial ...",
-  "answer": "Sam Bankman-Fried",
-  "question_type": "inference_query",
-  "evidence_list": [
-    { "title": "The FTX trial is bigger than Sam Bankman-Fried",
-      "fact": "Before his fall, Bankman-Fried made himself out to be the Good Boy of crypto ...",
-      "source": "...", "url": "...", "author": "...", "published_at": "...", "category": "..." },
-    { "...": "... 共 3 条，分散在 3 篇不同文章 ..." }
-  ]
-}
-```
-
-`question_type` 分布（共 2556）：
-
-| 类型 | 数量 | 含义 | 我们映射成 |
-|---|---|---|---|
-| `comparison_query` | 856 | 跨文档比较 | `multihop` |
-| `inference_query` | 816 | 跨文档推断 | `multihop` |
-| `temporal_query` | 583 | 跨文档时序 | `multihop` |
-| `null_query` | 301 | **语料里信息不足** | `negative`（应拒答） |
-
-### 3.4 我们怎么用这两个文件（`corpus_multihop.py`）
-
-- `load_corpus()`：读 `corpus.json` → 把每篇 `body` 按 **1200 字符 / 重叠 150** 切块，每块拼上标题 →
-  得到 **6194 个片段**（`Doc`，`source = 文章标题`）。
-- `load_examples()`：读 `MultiHopRAG.json` → 每个问题转成一条 `Example`：
-  `question=query`，`reference=answer`，`sources=evidence 里的所有 title`（= gold 来源），
-  `kind = null_query?negative:multihop`。
-- 因为**检索片段的 `source` 和 gold 证据都用文章标题**，所以能直接算 `hit@k` 和 `coverage`（多跳覆盖率）。
-
-### 3.5 如何重新下载（`data/` 丢了/换机器时）
+### 如何重新下载
 
 ```bash
 cd agentic-rag && mkdir -p data
 curl -sL https://huggingface.co/datasets/yixuantt/MultiHopRAG/resolve/main/corpus.json      -o data/corpus.json
 curl -sL https://huggingface.co/datasets/yixuantt/MultiHopRAG/resolve/main/MultiHopRAG.json -o data/MultiHopRAG.json
-# 校验（离线，无需模型）：
-.venv/bin/python -c "from corpus_multihop import load_corpus, load_examples; print(len(load_corpus()), '片段', len(load_examples()), '例')"   # 应打印 6194 片段 2556 例
+# 离线自检（无需模型）：
+.venv/bin/python -c "from corpus_multihop import load_corpus, load_examples; print(len(load_corpus()), '片段', len(load_examples()), '例')"  # 6194 片段 2556 例
 ```
 
 ---
@@ -161,29 +91,29 @@ curl -sL https://huggingface.co/datasets/yixuantt/MultiHopRAG/resolve/main/Multi
 ```bash
 cd agentic-rag
 python -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-cp .env.example .env      # 填 OPENAI_API_KEY / OPENAI_BASE_URL / RAG_MODEL / LANGSMITH_*（真 key 放 .env，别放 .env.example）
-# 注：agent.py 启动时自动加载 .env（python-dotenv），无需手动 source。
+pip install -r requirements.txt        # 含 sentence-transformers（会拉 torch）；首次跑会自动下 bge 模型
+cp .env.example .env                    # 填 OPENAI_API_KEY / OPENAI_BASE_URL / RAG_MODEL / LANGSMITH_*（真 key 放 .env）
 
 # 1) 免费离线自检（不调模型）：语料加载 + 分块
 python -c "from corpus_multihop import load_corpus, load_examples; print(len(load_corpus()), '片段', len(load_examples()), '例')"
 
-# 2) 跑 agentic 检索，看过程层（需要模型 key）
+# 2) 跑 hybrid 检索（首次会下 bge 模型 + 编码 6194 片段，之后走 .cache 缓存）
 python run.py "Who is the individual associated with the cryptocurrency industry facing a criminal trial?"
+python run.py --no-gen "..."           # 只看检索排名，不调生成模型
 
-# 3) P3 评测：真实语料 MultiHop-RAG 上 agentic vs 单次（含 coverage）
-python eval_multihop.py --n 10                # 本地 delta 表
-python eval_multihop.py --n 10 --langsmith    # 同上 + 推 dataset+experiment 到 LangSmith
+# 3) LLM-judge 评测（openevals，judge=模型；--upload 另推 LangSmith）
+python eval_rag.py --n 8                # 本地打分表
+python eval_rag.py --n 8 --upload       # 同上 + 推 dataset + experiment 到 LangSmith
 ```
 
-> **网关提示**：某些中转网关 WAF 拦未知 UA → 设 `RAG_USER_AGENT=claude-code/2.1.214`；
-> 偶发 5xx/超时 → `RAG_MAX_RETRIES` / `RAG_TIMEOUT`（`build_model` 已读取）。
+> **网关提示**：某些中转网关 WAF 拦未知 UA → 设 `RAG_USER_AGENT`；偶发 5xx/超时 → `RAG_MAX_RETRIES` / `RAG_TIMEOUT`（`build_model` 已读取）。
+> `eval_rag.py` 单题失败会跳过、不毁整轮。
 
 ---
 
 ## 五、架构与关键设计
 
-**一句话**：`create_react_agent` 给我 loop，`Retriever` 协议给我可替换后端，`rag_search` 是模型唯一的抓手。
+**一句话**：`Retriever` 协议给我可替换后端；hybrid 把词法/向量的盲区互补起来；reranker 精排；生成只用检索到的内容并标引用。
 
 ```python
 # retriever.py —— 后端只需实现这个协议，其余代码全不动
@@ -191,105 +121,78 @@ python eval_multihop.py --n 10 --langsmith    # 同上 + 推 dataset+experiment 
 class Retriever(Protocol):
     def search(self, query: str, k: int = 4) -> list[Hit]: ...
 
-# 两个后端，同一协议：
-#   BM25Retriever      (当前, 真实语料词法检索, retriever_bm25.py)
-#   VectorRetriever    (待做, chroma + bge)
-
-# agent.py —— 一行 loop；何时查/查几次/何时停由模型在策略下决定，不是写死的控制流
-def build_agent(retriever):
-    return create_react_agent(build_model(), [make_rag_search(retriever)], prompt=AGENTIC_RAG_SYSTEM)
+# 三个后端，同一协议：
+#   BM25Retriever     词法（rank_bm25）
+#   DenseRetriever    bge-small-en-v1.5 向量，归一化余弦
+#   HybridRetriever   ↑两者加权融合 → bge-reranker-base 重排
 ```
 
-> **为什么用 BM25 词法而非向量**：向量检索一次 top-k 常把分散证据一把糊上来，反而**看不出 agentic**。词法检索
-> 的跨跳措辞差异让单次只给部分链，**逼模型改写、多跳**——过程层行为才可观测、可评。
+**HybridRetriever 的三步**（`retriever_hybrid.py`）：
+
+1. **召回**：BM25、Dense 各取 top-`pool`(默认 20)。
+2. **融合**：各自分数 **min-max 归一化后按权重相加**（默认 `w_bm25 = w_dense = 0.5`）；同一片段两边都命中则叠加。
+3. **重排**：融合候选池丢给 `bge-reranker-base`（cross-encoder），按 (query, passage) 相关性取 top-k。
+
+> 想调：`HybridRetriever(docs, w_bm25=.3, w_dense=.7, pool=30)`；升级模型改 `retriever_dense.py` 的 `bge-base-en-v1.5` / `retriever_hybrid.py` 的 `bge-reranker-v2-m3` 即可，上层不动。
 
 ---
 
-## 六、四条 agentic 策略 = 四个评测轴（★ 全篇核心）
+## 六、评测设计（openevals · LLM-as-judge · LangSmith）
 
-`prompts.py` 里的系统提示写了四条策略，一一对应过程层的四个问题、和 `eval_metrics.py` 的指标：
+不再用自研启发式指标，而是 **openevals**（LangChain 官方开源评估器）的现成 **LLM-as-judge**——语义级、贴近生产。
+裁判 LLM 走你配置的网关（如 grok），四个轴一一对应 RAG 的关键问题：
 
-| 过程层问题 | 策略 | 指标 | 说明 |
-|---|---|---|---|
-| **该不该查** | `1. DECIDE` | `discipline` | 需要知识才查；问候/算术/已知的**直接答**（省 token） |
-| **查几次** | `2. ITERATE` | `hit` + `coverage` + `avg_search` | 一次拿不全，**用刚学到的改写 query 再查** |
-| **会不会停** | `3. STOP` | `avg_search`（不该膨胀） | 证据够就停；**上限 4 次** |
-| **值不值·别幻觉** | `4. GROUND & CITE` | `faithful` + `correct` + `refusal` | 只用检索到的答、标 `[source:]`；查不到就认怂 |
-
----
-
-## 七、评测设计（怎么把「过程层」量出来）
-
-- **数据集**：真实库 MultiHop-RAG（`corpus_multihop.py`，从 2556 题里等距抽样），`kind`（multihop / negative）决定该考的行为。
-- **对照组**：`single_shot`（`eval_baseline.py`）= 检索一次 top-4 → 生成一次。**无迭代、无改写**，用来算 delta。
-- **确定性指标**（`eval_metrics.py`，无额外 LLM 成本 → 可复现、免费、离线可跑）：
-
-| 指标 | 怎么算 | 考什么 |
+| 指标（openevals prompt） | 考什么 | 需要 |
 |---|---|---|
-| `correct` | 参考答案是否出现在答案里（negative 则 = 正确拒答） | 结果对不对 |
-| `faithful` | **引用合法性代理**：cite 的 source ⊆ 实际检索到的 source | 有没有编来源 |
-| `hit` | 至少一个 gold source 被检索到（hit@k） | 检索质量 |
-| `discipline` | `no_retrieve → 0 次`，否则 `≥1 次` | 该不该查 |
-| `coverage` | gold 文档被检索到的**比例** | **多跳覆盖：agentic 的真实增益** |
+| `correctness` | 答案对不对（vs 参考答案） | question + answer + reference |
+| `groundedness` | 答案是否只由检索到的上下文支撑（**忠实度 / 不幻觉**） | answer + retrieved context |
+| `retrieval_relevance` | 检索到的上下文与问题相关吗（**检索质量**） | question + retrieved context |
+| `helpfulness` | 答案是否真正回应了问题 | question + answer |
 
-> 生产会补 **RAGAS / LLM-as-judge** 做语义级忠实度；这里的启发式是它的**低成本、可复现代理**。
+- 每个指标是 `[0,1]` 连续分（`continuous=True`），裁判同时给出**打分理由**（comment）。
+- `eval_rag.py --upload`：把抽样上传成 **LangSmith dataset**，用 `evaluate()` 跑 target（= 检索流水线）+ 上面四个评估器，
+  结果作为 **experiment** 落在 LangSmith 里（可视化、可对比多次实验）。
+- **成本**：LLM-judge 每题 = 1 次生成 + 4 次裁判调用，会花 token，先用小 `--n` 试。
 
----
-
-## 八、实测结果
-
-### 真实语料 MultiHop-RAG（BM25 · grok-4.5 · n=6 试点，0 跳过）
-
-| 指标 | AGENTIC | 单次 | delta |
-|---|---|---|---|
-| **coverage**（多跳覆盖） | 0.79 | 0.42 | **+0.38** ✅ |
-| **hit** | 1.00 | 0.83 | **+0.17** ✅ |
-| correct | 0.67 | 0.67 | +0.00 |
-| **faithful** | 0.50 | 0.67 | **−0.17** ❌ |
-| avg_search | 5.50 | 1.00 | — |
-
-**读法（有赢有输，都讲清）**：
-- ✅ **多跳覆盖大赢（+0.38 / hit +0.17）**——证据分散在 2~4 篇文章里，单次 BM25 只捞到 42% 的 gold 文档，agentic 迭代改写捞到 79%。这是单次检索在结构上给不了的信号。
-- ❌ **忠实度下滑（−0.17）**——跳得越多、引的来源越多，越容易引到检索集之外，或长标题严格匹配对不上。
-- ⚠️ **avg_search=5.5，越过 4 次上限**——明细里 negative 各搜 6 次才拒答、一道多跳搜 8 次；注意 `discipline` 指标只查「该不该搜」、查不到「搜太多」，是 `avg_search` 暴露了模型不守 STOP 上限。
-- 🔑 **收口**：**过程层的收益与风险都被模型能力放大**——多跳补覆盖，但忠实度与停机纪律要靠**硬 STOP + 忠实度守卫**兜底；agentic 不是免费午餐。
-- 局限：n=6 偏小（4 多跳 + 2 拒答），只看方向；`faithful` 是长标题严格字符串匹配（有度量假象）；`correct` 是子串近似。
-
-> **工程坑**：grok-4.5 在中转网关上多跳单次调用可能 **>120s → Cloudflare 524 超时**；`eval_multihop.py` 因此做了
-> 「单题失败只跳过、不毁整轮」+ 模型层 `max_retries`。本次 n=6 试点用 `RAG_TIMEOUT` / `RAG_MAX_RETRIES` 快速失败设置，0 跳过跑通。
+> 对照：自研确定性指标（子串匹配、集合包含）**免费、可复现**但只是语义的粗代理；LLM-judge **语义级但花钱、不完全可复现**。
+> 早期 agentic 版本用的是前者（见 tag `v1-agentic-comparison`），这一版换成后者。
 
 ---
 
-## 九、怎么迁进 SlotFlow
+## 七、实测结果
 
-**只搬核心，不搬脚手架**：
+### 真实语料 MultiHop-RAG（hybrid + reranker · judge = grok-4.5 · n=6 试点）
 
-| agentic-rag 的东西 | 进 SlotFlow？ | 说明 |
+| 指标 | 均分 | 说明 |
 |---|---|---|
-| `rag_search` 工具 + `Retriever`/`Doc`/`Hit` 协议 | ✅ 搬（约几十行 + 改 import） | 注册进 `tool_spaces.py` 一个工具空间 |
-| 过程层策略（prompt 四条） | ✅ 搬（下沉成工具 description + 一句 system prompt） | |
-| `VectorRetriever` + 真实语料 | ✅ 但要新写/接真语料 | 这才是「让它有用」的主要工作量 |
-| `agent.py` / `run.py`（ReAct loop + CLI） | ❌ 不搬 | SlotFlow 自己就是 loop |
-| `eval_*` + 真实语料评测台 | ❌ 不搬 | 独立评测台；指标逻辑可借鉴 |
+| **groundedness**（忠实度） | **1.00** ✅ | 6/6 答案都只由检索到的上下文支撑，**零幻觉** |
+| retrieval_relevance（检索质量） | 0.72 | 多数题检到相关证据；难多跳掉链 |
+| correctness（正确率） | 0.67 | 4/6 正确 |
+| helpfulness | 0.67 | 跟随正确率（查不到就诚实认怂） |
 
-> **为什么先独立做**：隔离环境能**逼出并观测过程层行为**、**干净评测**、**快迭代不碰生产**，并**对着干净接口先探路**——
-> 所以最后迁移才机械、低风险。「易迁移」是分割的**回报**，不是矛盾。
+**读法（有强有弱，都讲清）**：
+- ✅ **忠实度满分（1.00）**——hybrid + reranker 检索质量够 + grounded 生成 + `[source:]` 纪律，让模型「只用检到的、查不到就认怂」，**实测零幻觉**。这是生产 RAG 最要命的一项。
+- ⚠️ **correctness / retrieval = 0.67 / 0.72**——6 题里 4 题满分，2 题失败的**都是难多跳**（如 “Between the report … published at 23:02 …” 这种精确时序 + 跨文档比较），单次检索没把**分散在多篇**的证据凑齐（这两题 `retrieval_relevance` = 0.50 / 0.00）。
+- 🔑 **收口**：**单次强检索能把幻觉压到 0，但对「证据分散在多篇」的多跳仍有天花板**——而这正是被冻结的 agentic 多跳版本（tag `v1-agentic-comparison`）要补的地方。**强检索与 agentic 多跳是正交、互补的两条路。**
+- 局限：n=6 偏小只看方向；单模型（grok）当裁判、不完全可复现；`retrieval_relevance` 对时序/数值类多跳判得偏严。
 
----
-
-## 十、路线图
-
-- **过程层（✅）**：`rag_search` 工具 + agentic loop + 四条策略 + LangSmith tracing。
-- **真实语料评测（✅）**：`corpus_multihop.py` + `retriever_bm25.py` + `eval_multihop.py`，MultiHop-RAG 上 agentic vs 单次；grok-4.5 · n=6 试点 **coverage +0.38 / hit +0.17**，并暴露 faithful −0.17、avg_search 5.5（越过停机上限）。
-- **LangSmith 评测（✅）**：`eval_multihop.py --langsmith` 把自定义指标（含 coverage）包装成 LangSmith evaluator，一键推 dataset + experiment。
-- **向量后端（可选）**：`BM25Retriever` → `VectorRetriever`（chroma + bge），同协议、上层不动；再跑 MuSiQue（对抗多跳）加码。
+> 复现：`python eval_rag.py --n 6`（加 `--upload` 把这张表变成 LangSmith 上的 experiment）。
 
 ---
 
-## 十一、一句话面试话术
+## 八、路线图
 
-> 「我把 RAG 拆两段：建库是离线基础设施、不是工具；真正 agentic 的是**检索侧的决策**。所以我把**过程层**做扎实——
-> 模型自己决定该不该查、多跳改写、什么时候停、查不到就拒答——再用确定性指标 + LangSmith 把这些**量化**（检索次数、
-> 忠实度、agentic vs 单次的 delta）。真实语料（MultiHop-RAG）上多跳覆盖 **+0.38 / hit +0.17**，但也实测到多跳会把
-> 忠实度带崩、越过停机上限——**收益和风险都被模型能力放大**。检索后端是可替换接口，换语料/换向量时上层零改动。
-> **知道什么时候不该检索，比会检索更值钱。**」
+- **混合检索（✅）**：BM25 + bge dense 加权融合 + bge-reranker 重排，同一 `Retriever` 协议。
+- **LLM-judge 评测（✅）**：openevals 四轴（correctness / groundedness / retrieval_relevance / helpfulness），judge=网关模型，可 `--upload` 到 LangSmith。
+- **调优（可选）**：融合权重 / `pool` 大小 / reranker 升级 `bge-reranker-v2-m3` / 向量升级 `bge-base` 的消融对比。
+- **向量库（可选）**：`DenseRetriever` 现为内存 numpy 余弦；数据量大时可换 chroma / faiss（同协议、上层不动）。
+- **历史归档**：agentic 过程层 + 「agentic vs 单次」对比在 tag `v1-agentic-comparison`。
+
+---
+
+## 九、一句话面试话术
+
+> 「RAG 的上限在检索，不在生成。所以我搭了一条生产级检索栈：**BM25 词法 + bge 向量加权融合**把两种召回的盲区互补，
+> 再用 **cross-encoder 重排**精排——召回和精度分两步拿。后端全在一个 `Retriever` 协议后面可替换。评测我用 **openevals 的
+> LLM-as-judge**（correctness / 忠实度 / 检索相关性 / helpfulness），裁判走网关模型，一键推 **LangSmith** 做实验追踪。
+> 这个项目还有个 agentic 前身（模型自己决定查不查、多跳、何时停），冻结在一个 tag 里——**我知道 agentic 和强检索是两条正交的路，也知道各自该怎么量化。**」
