@@ -18,7 +18,7 @@ from retriever import Doc, Hit
 from retriever_bm25 import BM25Retriever
 from retriever_dense import DenseRetriever
 
-_RERANKER = "BAAI/bge-reranker-base"
+_RERANKER = "BAAI/bge-reranker-v2-m3"
 
 
 def _minmax(x: np.ndarray) -> np.ndarray:

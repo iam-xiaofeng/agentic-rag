@@ -123,8 +123,8 @@ class Retriever(Protocol):
 
 # 三个后端，同一协议：
 #   BM25Retriever     词法（rank_bm25）
-#   DenseRetriever    bge-small-en-v1.5 向量，归一化余弦
-#   HybridRetriever   ↑两者加权融合 → bge-reranker-base 重排
+#   DenseRetriever    bge-large-en-v1.5 向量，归一化余弦（有 GPU 自动用 CUDA）
+#   HybridRetriever   ↑两者加权融合 → bge-reranker-v2-m3 重排
 ```
 
 **HybridRetriever 的三步**（`retriever_hybrid.py`）：
@@ -133,7 +133,7 @@ class Retriever(Protocol):
 2. **融合**：各自分数 **min-max 归一化后按权重相加**（默认 `w_bm25 = w_dense = 0.5`）；同一片段两边都命中则叠加。
 3. **重排**：融合候选池丢给 `bge-reranker-base`（cross-encoder），按 (query, passage) 相关性取 top-k。
 
-> 想调：`HybridRetriever(docs, w_bm25=.3, w_dense=.7, pool=30)`；升级模型改 `retriever_dense.py` 的 `bge-base-en-v1.5` / `retriever_hybrid.py` 的 `bge-reranker-v2-m3` 即可，上层不动。
+> 想调：`HybridRetriever(docs, w_bm25=.3, w_dense=.7, pool=30)`。默认已用 `bge-large-en-v1.5`（1024 维）+ `bge-reranker-v2-m3`（GPU 上跑）；无显卡的机器可在 `retriever_dense.py` / `retriever_hybrid.py` 改回 `bge-small-en-v1.5` / `bge-reranker-base`。
 
 ---
 
@@ -161,22 +161,30 @@ class Retriever(Protocol):
 
 ## 七、实测结果
 
-### 真实语料 MultiHop-RAG（hybrid + reranker · judge = grok-4.5 · n=6 试点）
+### 真实语料 MultiHop-RAG（hybrid + reranker · judge = grok · n=6 试点）
+
+当前默认模型 **bge-large-en-v1.5 + bge-reranker-v2-m3**（GPU）：
 
 | 指标 | 均分 | 说明 |
 |---|---|---|
-| **groundedness**（忠实度） | **1.00** ✅ | 6/6 答案都只由检索到的上下文支撑，**零幻觉** |
-| retrieval_relevance（检索质量） | 0.72 | 多数题检到相关证据；难多跳掉链 |
-| correctness（正确率） | 0.67 | 4/6 正确 |
-| helpfulness | 0.67 | 跟随正确率（查不到就诚实认怂） |
+| **groundedness**（忠实度） | **0.98** ✅ | 几乎零幻觉——生产 RAG 最要命的一项，稳 |
+| retrieval_relevance（检索质量） | 0.65 | 见下「小样本警告」 |
+| correctness（正确率） | 0.49 | 6 题里 3 满分、3 失败 |
+| helpfulness | 0.48 | 跟随正确率（查不到就诚实认怂） |
 
-**读法（有强有弱，都讲清）**：
-- ✅ **忠实度满分（1.00）**——hybrid + reranker 检索质量够 + grounded 生成 + `[source:]` 纪律，让模型「只用检到的、查不到就认怂」，**实测零幻觉**。这是生产 RAG 最要命的一项。
-- ⚠️ **correctness / retrieval = 0.67 / 0.72**——6 题里 4 题满分，2 题失败的**都是难多跳**（如 “Between the report … published at 23:02 …” 这种精确时序 + 跨文档比较），单次检索没把**分散在多篇**的证据凑齐（这两题 `retrieval_relevance` = 0.50 / 0.00）。
-- 🔑 **收口**：**单次强检索能把幻觉压到 0，但对「证据分散在多篇」的多跳仍有天花板**——而这正是被冻结的 agentic 多跳版本（tag `v1-agentic-comparison`）要补的地方。**强检索与 agentic 多跳是正交、互补的两条路。**
-- 局限：n=6 偏小只看方向；单模型（grok）当裁判、不完全可复现；`retrieval_relevance` 对时序/数值类多跳判得偏严。
+**⚠️ 小样本警告——别拿 6 个样本给模型选型下结论**：
 
-> 复现：`python eval_rag.py --n 6`（加 `--upload` 把这张表变成 LangSmith 上的 experiment）。
+| 同 n=6 对照 | correct | ground | retr | help |
+|---|---|---|---|---|
+| bge-small + reranker-base | 0.67 | 1.00 | 0.72 | 0.67 |
+| **bge-large + reranker-v2-m3**（现默认） | 0.49 | 0.98 | 0.65 | 0.48 |
+
+- **换更大的模型在这 6 题上没有可辨识的提升**——groundedness 两组都 ~1.0，其余差异**全在噪声内**（就一道题从满分翻成失败，均值被拉低 0.15+）。
+- 原因：n=6 太小 + LLM-judge（grok）**不完全可复现**；而且「更大的模型 ≠ 每条 query 都更好」，检索质量是**逐 query** 的。
+- **结论**：要真分辨模型 / 参数好坏，得把 `--n` 拉到 **20~30+** 才有统计意义——这本身是个诚实的工程教训。
+- 唯一稳的信号：**不管大小模型，grounded 生成 + `[source:]` 纪律把幻觉压到近 0**；失败集中在「证据分散多篇」的难多跳——正是被冻结的 agentic 多跳版本（tag `v1-agentic-comparison`）要补的地方。**强检索与 agentic 多跳正交、互补。**
+
+> 复现：`python eval_rag.py --n 6`（`--n 30` 才够分辨模型差异；加 `--upload` 推 LangSmith）。
 
 ---
 
@@ -184,7 +192,7 @@ class Retriever(Protocol):
 
 - **混合检索（✅）**：BM25 + bge dense 加权融合 + bge-reranker 重排，同一 `Retriever` 协议。
 - **LLM-judge 评测（✅）**：openevals 四轴（correctness / groundedness / retrieval_relevance / helpfulness），judge=网关模型，可 `--upload` 到 LangSmith。
-- **调优（可选）**：融合权重 / `pool` 大小 / reranker 升级 `bge-reranker-v2-m3` / 向量升级 `bge-base` 的消融对比。
+- **调优（可选）**：融合权重（`w_bm25/w_dense`）/ `pool` 大小的消融对比（编码 / 重排已上 `bge-large-en-v1.5` + `bge-reranker-v2-m3`，GPU）。
 - **向量库（可选）**：`DenseRetriever` 现为内存 numpy 余弦；数据量大时可换 chroma / faiss（同协议、上层不动）。
 - **历史归档**：agentic 过程层 + 「agentic vs 单次」对比在 tag `v1-agentic-comparison`。
 

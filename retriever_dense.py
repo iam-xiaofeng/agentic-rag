@@ -3,8 +3,8 @@
 它是 hybrid 的两条腿之一：BM25 看「词面重叠」，dense 看「语义相近」，两者互补。
 bge 把 query 和 passage 都编码成**归一化向量**，用余弦相似度（= 点积）排序。
 
-模型（本地跑，首次自动下载）：
-  - 编码：BAAI/bge-small-en-v1.5（384 维，英文、CPU 友好；可升级 bge-base-en-v1.5）
+模型（本地跑，首次自动下载；有 CUDA 时 sentence-transformers 自动用 GPU）：
+  - 编码：BAAI/bge-large-en-v1.5（1024 维，英文强档；GPU 上编码很快）
   - bge-*-en-v1.5 官方建议：**只给 query 加检索指令前缀**，passage 不加。
 
 语料向量按 (模型, 语料指纹) 缓存到 .cache/*.npy，第二次起免重算。
@@ -19,7 +19,7 @@ import numpy as np
 
 from retriever import Doc, Hit
 
-_MODEL = "BAAI/bge-small-en-v1.5"
+_MODEL = "BAAI/bge-large-en-v1.5"
 # bge-en-v1.5 检索时给 query 的指令前缀（passage 不加）。
 _QUERY_PROMPT = "Represent this sentence for searching relevant passages: "
 _CACHE = pathlib.Path(__file__).resolve().parent / ".cache"
