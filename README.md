@@ -197,7 +197,19 @@ class Retriever(Protocol):
 - **结论**：要真分辨模型 / 参数好坏，得把 `--n` 拉到 **20~30+** 才有统计意义——这本身是个诚实的工程教训。
 - 唯一稳的信号：**不管大小模型，grounded 生成 + `[source:]` 纪律把幻觉压到近 0**；失败集中在「证据分散多篇」的难多跳——正是并存的 agentic 多跳（`run_agentic.py`）要补的地方。**强检索与 agentic 多跳正交、互补。**
 
-> 复现：`python eval_rag.py --n 6`（`--n 30` 才够分辨模型差异；加 `--upload` 推 LangSmith）。
+### LangSmith 数据集实验（`multihop-rag` · n=12 · 含 context_recall）
+
+在上传的全量数据集上跑一次（`eval_rag.py --dataset multihop-rag --n 12`），比本地多一个**确定性 `context_recall`**（gold 文章标题 ∩ 检索到的 source，不花 LLM）：
+
+| correctness | groundedness | retrieval_relevance | helpfulness | **context_recall** |
+|---|---|---|---|---|
+| 0.42 | **1.00** | 0.64 | 0.52 | **0.64** |
+
+- **瓶颈定位清楚**：`groundedness` 满分（零幻觉），但 `context_recall` 只有 **0.64**——难多跳的 gold 证据分散在 2~4 篇，单次检索只捞到约 2/3，`correctness`(0.42) 因此被**检索召回**卡住，**不是模型幻觉**。
+- `retrieval_relevance`（LLM judge，0.64）和确定性 `context_recall`（0.64）**几乎一致**——两个独立口径互相印证。
+- **提升方向**：补召回（更多跳 / 更大 `pool` / 更好融合），或直接上并存的 **agentic 多跳**（`run_agentic.py`）——正是它的用武之地。
+
+> 复现：`python eval_rag.py --dataset multihop-rag --n 12`（结果落 LangSmith experiment `hybrid-on-multihop-rag-*`）；本地小样对照：`python eval_rag.py --n 6`。
 
 ---
 

@@ -8,8 +8,9 @@
 
 每个指标是 [0,1] 连续分（continuous=True），judge 还给出打分理由（comment）。
 
-    python eval_rag.py --n 8            # 本地评分 + 打印
-    python eval_rag.py --n 8 --upload   # 另把 dataset + experiment 推到 LangSmith
+    python eval_rag.py --n 8                          # 本地评分 + 打印
+    python eval_rag.py --n 8 --upload                 # 造个本地抽样 dataset + experiment 推 LangSmith
+    python eval_rag.py --dataset multihop-rag --n 12  # 在已上传的 LangSmith 数据集上跑实验（用 gold 证据）
 
 需要模型凭据（OPENAI_* / RAG_MODEL，llm.py 会自动读 .env）；--upload 另需 LANGSMITH_API_KEY。
 成本提醒：每题 = 1 次生成 + 4 次裁判调用，n 越大越费 token，先用小 n 试。
@@ -75,15 +76,21 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--n", type=int, default=8, help="评测题数")
     ap.add_argument("--topk", type=int, default=4, help="每题检索片段数")
-    ap.add_argument("--upload", action="store_true", help="把 dataset + experiment 推到 LangSmith")
+    ap.add_argument("--upload", action="store_true", help="造本地抽样 dataset + experiment 推 LangSmith")
+    ap.add_argument("--dataset", default=None,
+                    help="在已有 LangSmith 数据集（如 multihop-rag）上跑实验，用它的 gold 证据评测")
     args = ap.parse_args()
 
     print("构建 hybrid 索引（BM25 + bge 向量 + reranker；首次会下模型/编码语料）...")
     retriever = HybridRetriever(load_corpus())
-    data = _sample(args.n)
     model = build_model()
     judges = _judges(model)
 
+    if args.dataset:
+        _run_on_dataset(retriever, judges, model, args.dataset, args.n, args.topk)
+        return
+
+    data = _sample(args.n)
     if args.upload:
         _upload(retriever, data, judges, model, args.topk)
         return
@@ -143,6 +150,57 @@ def _upload(retriever, data: list[Example], judges, model, topk: int) -> None:
         client=client,
     )
     print(f"\n[langsmith] 已推送 dataset + experiment '{name}'。")
+
+
+def _context_recall(run, example) -> dict:
+    """确定性 context recall：gold 文章标题里有多少被检索到（不花 LLM，用上传的 gold 证据）。"""
+    gold = set(example.outputs.get("gold_titles") or [])
+    got = set(run.outputs.get("sources") or [])
+    return {"key": "context_recall", "score": (len(gold & got) / len(gold)) if gold else None}
+
+
+def _run_on_dataset(retriever, judges, model, dataset: str, n: int, topk: int) -> None:
+    """在已有的 LangSmith 数据集（如 multihop-rag）上跑实验：
+    target = 检索流水线；评估器 = 4 个 openevals LLM-judge + 确定性 context_recall（用 gold 证据）。"""
+    from langsmith import Client, evaluate
+
+    client = Client()
+    examples = [e for e in client.list_examples(dataset_name=dataset)
+                if (e.outputs or {}).get("kind") == "multihop"]
+    if not examples:
+        print(f"数据集 {dataset!r} 里没有 multihop 例（或数据集不存在）。")
+        return
+    step = max(1, len(examples) // n)
+    examples = examples[::step][:n]
+    print(f"在 {dataset!r} 上取 {len(examples)} 道 multihop 跑实验（每题 1 生成 + 4 裁判）...")
+
+    def target(inputs: dict) -> dict:
+        out = answer(inputs["question"], retriever, k=topk, model=model)
+        return {"answer": out["answer"], "sources": out["sources"], "contexts": out["contexts"]}
+
+    def _adapt(name, fn):
+        def scorer(run, example):
+            r = _call(name, fn, example.inputs["question"], run.outputs,
+                      example.outputs.get("reference", ""))
+            return {"key": name, "score": r["score"], "comment": r.get("comment")}
+        return scorer
+
+    evaluators = [_adapt(k, judges[k]) for k in _SPECS] + [_context_recall]
+    results = evaluate(target, data=examples, evaluators=evaluators,
+                       experiment_prefix=f"hybrid-on-{dataset}", max_concurrency=4, client=client)
+    try:
+        agg: dict[str, list] = {}
+        for row in results:
+            for er in (row["evaluation_results"]["results"] or []):
+                if er.score is not None:
+                    agg.setdefault(er.key, []).append(er.score)
+        print(f"\n== 平均（{dataset}，{len(examples)} 题）==")
+        for k in list(_SPECS) + ["context_recall"]:
+            v = agg.get(k, [])
+            print(f"  {k:20s}: {sum(v) / len(v):.2f}" if v else f"  {k:20s}: n/a")
+    except Exception as e:  # 聚合读取失败不影响实验已落库
+        print(f"（本地聚合失败，去 LangSmith 看即可：{type(e).__name__}: {str(e)[:60]}）")
+    print(f"[langsmith] 已在数据集 {dataset!r} 上跑完实验（前缀 hybrid-on-{dataset}）。")
 
 
 if __name__ == "__main__":
