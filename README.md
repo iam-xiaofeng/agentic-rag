@@ -2,7 +2,7 @@
 
 > 一个**面试可讲、可跑、可评测**的 agentic RAG 最小实现。
 > **重点不是「建库」，而是 agentic 过程层**：模型自己决定 **该不该查 / 查几次 / 会不会停 / 值不值（别幻觉）**。
-> 检索后端藏在一个协议后面、**可替换**：玩具库（关键词）→ 真实语料（BM25）→ 稠密向量（bge），换后端时上层一行不动。
+> 检索后端藏在一个协议后面、**可替换**：真实语料（BM25 词法）→ 稠密向量（bge，待做），换后端时上层一行不动。
 >
 > 这份 README 力求**自包含**：读完它，你应该能了解本项目的每个文件、`data/` 里是什么、怎么跑、评测怎么设计、
 > 实测结果如何、以及怎么迁进 SlotFlow。
@@ -17,8 +17,12 @@ RAG = **检索(retrieve) → 拼上下文(augment) → 生成(generate)**。它�
 - 🔍 **检索**（`rag_search`）—— **唯一暴露给模型的工具**。
 
 **「agentic」的价值全在检索这一侧的决策链**，不在建库。所以本项目**先把过程层做扎实**，把语料/索引这个重活
-**解耦、延后**：`Retriever` 是个协议（interface），先用**故意做笨的关键词检索**逼模型多跳，再换真实语料的
-`BM25Retriever`，最后可升级 `VectorRetriever`（chroma + bge）—— **每次只换后端，工具/agent/评测都不动**。
+**解耦**在一个协议后面：`Retriever` 是个 interface，当前后端是真实语料上的 **`BM25Retriever`**（词法检索），
+将来可升级 `VectorRetriever`（chroma + bge）—— **每次只换后端，工具/agent/评测都不动**。
+
+> **为什么用 BM25 词法、而不是一上来就上向量**：词法检索**看词面**，跨跳的措辞差异让单次查询天然「欠覆盖」证据链——
+> 正好逼模型改写 query、多跳检索，**过程层行为才可观测、可评**。向量检索一次 top-k 常把分散证据一把糊上来，
+> 反而**看不出 agentic**。（这也是本项目早期用一个「故意做笨的关键词玩具库」做冒烟的原因，现已并入真实语料。）
 
 ---
 
@@ -27,28 +31,24 @@ RAG = **检索(retrieve) → 拼上下文(augment) → 生成(generate)**。它�
 ```
 agentic-rag/
 ├── README.md            # 本文件（完整说明）
-├── requirements.txt     # 依赖：langchain-openai / langgraph / rank_bm25 / langsmith ...
+├── requirements.txt     # 依赖：langchain-openai / langgraph / rank-bm25 / python-dotenv / langsmith
 ├── .env.example         # 配置模板（复制成 .env 填真实值；真 key 别写这里）
 ├── .env                 # 真实密钥（已 gitignore，不提交；模型 + LangSmith 凭据）
 │
-│  ── 核心（P1）：工具 + 检索接口 + agentic loop ──
-├── sample_kb.py         # 7 条虚构文档（多跳链 + 干扰项 + 故意留空）——玩具占位语料
-├── retriever.py         # Retriever 协议 + Doc/Hit 数据类 + InMemoryRetriever（关键词重叠）
+│  ── 核心：工具 + 检索接口 + agentic loop ──
+├── retriever.py         # Retriever 协议 + Doc/Hit 数据类（检索后端的地基）
+├── retriever_bm25.py    # BM25Retriever：真实语料词法检索（实现 Retriever 协议，零重依赖、无 torch）
 ├── tools.py             # rag_search：唯一暴露给模型的工具（query → 带 [source:] 引用的片段）
-├── prompts.py           # 系统提示 = agentic 四条策略（过程层写死在这一处，不是硬编码控制流）
-├── agent.py             # create_react_agent：model →(rag_search → model)* → stop；含 build_model
-├── run.py               # CLI：提一个问题，逐步打印每次检索 / 改写 / 停
+├── prompts.py           # 系统提示 = agentic 四条策略（过程层写在这一处，不是硬编码控制流）
+├── agent.py             # create_react_agent：model →(rag_search → model)* → stop；含 build_model + .env 自动加载
+├── run.py               # CLI：在真实语料上提一个问题，逐步打印每次检索 / 改写 / 停
 │
-│  ── 评测（P2）：玩具库上 agentic vs 单次 ──
-├── eval_dataset.py      # 8 例：multihop / single / no_retrieve / negative
-├── eval_baseline.py     # single_shot：检索一次答一次（非 agentic 对照组）
-├── eval_metrics.py      # 确定性指标：correct / faithful / hit / discipline / refusal
-├── eval_run.py          # 玩具库 delta 表 + 可 --langsmith 推 dataset+experiment 到 LangSmith
-│
-│  ── 真实语料（P3）：MultiHop-RAG + BM25 ──
+│  ── 语料 + 评测 ──
 ├── corpus_multihop.py   # 加载 data/ 的 MultiHop-RAG（609 篇 → 6194 片段 + 2556 问）
-├── retriever_bm25.py    # BM25Retriever（同 Retriever 协议，词法检索，零重依赖、无 torch）
-├── eval_multihop.py     # 真实语料上 agentic vs 单次 + coverage（多跳覆盖率）
+├── eval_dataset.py      # Example 数据类（评测样例的共享类型）
+├── eval_baseline.py     # single_shot：检索一次答一次（非 agentic 对照组）
+├── eval_metrics.py      # 确定性指标：correct / faithful / hit / discipline
+├── eval_multihop.py     # 真实语料上 agentic vs 单次 + coverage；含 run_agentic + 可 --langsmith 推送
 └── data/                # ← MultiHop-RAG 语料，见「第三节 data/ 详解」（已 gitignore）
     ├── corpus.json          # 609 篇新闻全文
     └── MultiHopRAG.json     # 2556 个多跳问题 + gold 证据
@@ -59,7 +59,7 @@ agentic-rag/
 ## 三、`data/` 详解（这里到底是什么）
 
 `data/` 放的是 **MultiHop-RAG** —— 一个**多跳 RAG 评测基准**，自带语料 + 问题 + gold 证据。
-我们用它做 **P3**：证明「换到真实、装不下上下文的语料后，agentic 多跳检索确实比单次强」。
+我们用它证明「在真实、装不下上下文的语料上，agentic 多跳检索确实比单次强」。
 
 - **来源**：HuggingFace 数据集 [`yixuantt/MultiHopRAG`](https://huggingface.co/datasets/yixuantt/MultiHopRAG)（配套论文 *MultiHop-RAG*，2024）。
 - **许可**：ODC-BY（开放、允许使用，署名即可）。
@@ -151,7 +151,7 @@ cd agentic-rag && mkdir -p data
 curl -sL https://huggingface.co/datasets/yixuantt/MultiHopRAG/resolve/main/corpus.json      -o data/corpus.json
 curl -sL https://huggingface.co/datasets/yixuantt/MultiHopRAG/resolve/main/MultiHopRAG.json -o data/MultiHopRAG.json
 # 校验（离线，无需模型）：
-.venv/bin/python corpus_multihop.py     # 应打印 6194 片段 / 2556 例
+.venv/bin/python -c "from corpus_multihop import load_corpus, load_examples; print(len(load_corpus()), '片段', len(load_examples()), '例')"   # 应打印 6194 片段 2556 例
 ```
 
 ---
@@ -163,18 +163,17 @@ cd agentic-rag
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env      # 填 OPENAI_API_KEY / OPENAI_BASE_URL / RAG_MODEL / LANGSMITH_*（真 key 放 .env，别放 .env.example）
+# 注：agent.py 启动时自动加载 .env（python-dotenv），无需手动 source。
 
-# 1) 零依赖先验检索（不调模型）
-python retriever.py                 # 玩具库关键词检索
-python corpus_multihop.py           # 真实语料加载 + 分块自检
+# 1) 免费离线自检（不调模型）：语料加载 + 分块
+python -c "from corpus_multihop import load_corpus, load_examples; print(len(load_corpus()), '片段', len(load_examples()), '例')"
 
 # 2) 跑 agentic 检索，看过程层（需要模型 key）
-python run.py "What language is the database used by Nimbus written in?"
+python run.py "Who is the individual associated with the cryptocurrency industry facing a criminal trial?"
 
-# 3) 评测
-python eval_run.py                  # P2：玩具库 agentic vs 单次 delta
-python eval_run.py --langsmith      # 同上 + 推 dataset+experiment 到 LangSmith
-python eval_multihop.py --n 10      # P3：真实语料 MultiHop-RAG 上的 delta（含 coverage）
+# 3) P3 评测：真实语料 MultiHop-RAG 上 agentic vs 单次（含 coverage）
+python eval_multihop.py --n 10                # 本地 delta 表
+python eval_multihop.py --n 10 --langsmith    # 同上 + 推 dataset+experiment 到 LangSmith
 ```
 
 > **网关提示**：某些中转网关 WAF 拦未知 UA → 设 `RAG_USER_AGENT=claude-code/2.1.214`；
@@ -192,19 +191,17 @@ python eval_multihop.py --n 10      # P3：真实语料 MultiHop-RAG 上的 delt
 class Retriever(Protocol):
     def search(self, query: str, k: int = 4) -> list[Hit]: ...
 
-# 三个后端，同一协议：
-#   InMemoryRetriever  (P1, 玩具库关键词重叠)
-#   BM25Retriever      (P3, 真实语料词法检索, retriever_bm25.py)
-#   VectorRetriever    (P3b, chroma + bge, 待做)
+# 两个后端，同一协议：
+#   BM25Retriever      (当前, 真实语料词法检索, retriever_bm25.py)
+#   VectorRetriever    (待做, chroma + bge)
 
 # agent.py —— 一行 loop；何时查/查几次/何时停由模型在策略下决定，不是写死的控制流
-def build_agent(retriever=None):
-    retriever = retriever or InMemoryRetriever()
+def build_agent(retriever):
     return create_react_agent(build_model(), [make_rag_search(retriever)], prompt=AGENTIC_RAG_SYSTEM)
 ```
 
-> **为什么玩具库故意做笨**：真检索一次 top-k 常把答案一把捞出，反而**看不出 agentic**。用关键词 + 停用词，
-> 单次只给部分链，**逼模型改写、多跳**——过程层行为才可观测、可评。
+> **为什么用 BM25 词法而非向量**：向量检索一次 top-k 常把分散证据一把糊上来，反而**看不出 agentic**。词法检索
+> 的跨跳措辞差异让单次只给部分链，**逼模型改写、多跳**——过程层行为才可观测、可评。
 
 ---
 
@@ -223,7 +220,7 @@ def build_agent(retriever=None):
 
 ## 七、评测设计（怎么把「过程层」量出来）
 
-- **数据集**：玩具库 8 例（`eval_dataset.py`）/ 真实库 MultiHop-RAG（`corpus_multihop.py`），`kind` 决定该考的行为。
+- **数据集**：真实库 MultiHop-RAG（`corpus_multihop.py`，从 2556 题里等距抽样），`kind`（multihop / negative）决定该考的行为。
 - **对照组**：`single_shot`（`eval_baseline.py`）= 检索一次 top-4 → 生成一次。**无迭代、无改写**，用来算 delta。
 - **确定性指标**（`eval_metrics.py`，无额外 LLM 成本 → 可复现、免费、离线可跑）：
 
@@ -233,7 +230,7 @@ def build_agent(retriever=None):
 | `faithful` | **引用合法性代理**：cite 的 source ⊆ 实际检索到的 source | 有没有编来源 |
 | `hit` | 至少一个 gold source 被检索到（hit@k） | 检索质量 |
 | `discipline` | `no_retrieve → 0 次`，否则 `≥1 次` | 该不该查 |
-| `coverage`（仅 P3） | gold 文档被检索到的**比例** | **多跳覆盖：agentic 的真实增益** |
+| `coverage` | gold 文档被检索到的**比例** | **多跳覆盖：agentic 的真实增益** |
 
 > 生产会补 **RAGAS / LLM-as-judge** 做语义级忠实度；这里的启发式是它的**低成本、可复现代理**。
 
@@ -241,36 +238,25 @@ def build_agent(retriever=None):
 
 ## 八、实测结果
 
-### P2 · 玩具库（grok-4.5 · 8 例）
+### 真实语料 MultiHop-RAG（BM25 · grok-4.5 · n=6 试点，0 跳过）
 
 | 指标 | AGENTIC | 单次 | delta |
 |---|---|---|---|
-| correct | 1.00 | 0.88 | **+0.12** |
-| discipline | 1.00 | 0.88 | **+0.12** |
-| faithful / hit | 1.00 | 1.00 | +0.00 |
-| avg_search | ~2 | 1.00 | — |
-
-**读法**：delta 全来自算术题 `15+27`——单次基线每次都硬检索（既 discipline=0 又答错），agentic 认出「不用查」。
-**多跳优势在 7 篇玩具库上显不出来**（单次 top-4 一把捞全）→ 所以要换真实语料。
-
-### P3 · 真实语料 MultiHop-RAG（BM25 · glm-5.2 · 8 题成功 / 2 题被网关 429 跳过）
-
-| 指标 | AGENTIC | 单次 | delta |
-|---|---|---|---|
-| **coverage**（多跳覆盖） | 0.57 | 0.43 | **+0.14** ✅ |
-| **hit** | 1.00 | 0.88 | **+0.12** ✅ |
-| correct | 0.62 | 0.62 | +0.00 |
-| **faithful** | 0.25 | 0.62 | **−0.38** ❌ |
-| avg_search | 3.62 | 1.00 | — |
+| **coverage**（多跳覆盖） | 0.79 | 0.42 | **+0.38** ✅ |
+| **hit** | 1.00 | 0.83 | **+0.17** ✅ |
+| correct | 0.67 | 0.67 | +0.00 |
+| **faithful** | 0.50 | 0.67 | **−0.17** ❌ |
+| avg_search | 5.50 | 1.00 | — |
 
 **读法（有赢有输，都讲清）**：
-- ✅ **多跳覆盖赢了**（+0.14 / hit +0.12）——玩具库 by construction 给不了的信号，agentic 迭代确实补上了单次捞不全的证据链。
-- ❌ **忠实度崩了（−0.38）、过度检索**（一道 negative 连搜 12 次没停）——根因是 **glm-5.2 不老实守 4 次上限**，越引越多、cite 落到检索集外。
-- 🔑 **收口**：**过程层的收益与风险都被模型能力放大**——强模型多跳补覆盖，弱模型多跳崩忠实度。agentic 不是免费午餐，得配**硬 STOP + 忠实度守卫**。
-- 局限：n=8 偏小；`faithful` 是长标题严格字符串匹配（有度量假象）；`correct` 是子串近似。
+- ✅ **多跳覆盖大赢（+0.38 / hit +0.17）**——证据分散在 2~4 篇文章里，单次 BM25 只捞到 42% 的 gold 文档，agentic 迭代改写捞到 79%。这是单次检索在结构上给不了的信号。
+- ❌ **忠实度下滑（−0.17）**——跳得越多、引的来源越多，越容易引到检索集之外，或长标题严格匹配对不上。
+- ⚠️ **avg_search=5.5，越过 4 次上限**——明细里 negative 各搜 6 次才拒答、一道多跳搜 8 次；注意 `discipline` 指标只查「该不该搜」、查不到「搜太多」，是 `avg_search` 暴露了模型不守 STOP 上限。
+- 🔑 **收口**：**过程层的收益与风险都被模型能力放大**——多跳补覆盖，但忠实度与停机纪律要靠**硬 STOP + 忠实度守卫**兜底；agentic 不是免费午餐。
+- 局限：n=6 偏小（4 多跳 + 2 拒答），只看方向；`faithful` 是长标题严格字符串匹配（有度量假象）；`correct` 是子串近似。
 
-> **工程坑**：grok-4.5 在中转网关上多跳单次调用 **>120s → Cloudflare 524 超时**，换 glm-5.2 才跑通；
-> `eval_multihop.py` 因此做了「单题失败只跳过、不毁整轮」+ 模型层 `max_retries`。
+> **工程坑**：grok-4.5 在中转网关上多跳单次调用可能 **>120s → Cloudflare 524 超时**；`eval_multihop.py` 因此做了
+> 「单题失败只跳过、不毁整轮」+ 模型层 `max_retries`。本次 n=6 试点用 `RAG_TIMEOUT` / `RAG_MAX_RETRIES` 快速失败设置，0 跳过跑通。
 
 ---
 
@@ -284,7 +270,7 @@ def build_agent(retriever=None):
 | 过程层策略（prompt 四条） | ✅ 搬（下沉成工具 description + 一句 system prompt） | |
 | `VectorRetriever` + 真实语料 | ✅ 但要新写/接真语料 | 这才是「让它有用」的主要工作量 |
 | `agent.py` / `run.py`（ReAct loop + CLI） | ❌ 不搬 | SlotFlow 自己就是 loop |
-| `eval_*` + 玩具/真实语料 | ❌ 不搬 | 独立评测台；指标逻辑可借鉴 |
+| `eval_*` + 真实语料评测台 | ❌ 不搬 | 独立评测台；指标逻辑可借鉴 |
 
 > **为什么先独立做**：隔离环境能**逼出并观测过程层行为**、**干净评测**、**快迭代不碰生产**，并**对着干净接口先探路**——
 > 所以最后迁移才机械、低风险。「易迁移」是分割的**回报**，不是矛盾。
@@ -293,16 +279,17 @@ def build_agent(retriever=None):
 
 ## 十、路线图
 
-- **P1（✅）**：`rag_search` 工具 + agentic loop + 四条策略 + LangSmith tracing。
-- **P2（✅）**：玩具库确定性评测 + agentic vs 单次 delta（可推 LangSmith）。
-- **P3（✅ 已初评）**：`corpus_multihop.py` + `retriever_bm25.py` + `eval_multihop.py`，MultiHop-RAG 上 **coverage +0.14 / hit +0.12**，并暴露弱模型 faithful −0.38。
-- **P3b（可选）**：`BM25Retriever` → `VectorRetriever`（chroma + bge），同协议、上层不动；再跑 MuSiQue（对抗多跳）加码。
+- **过程层（✅）**：`rag_search` 工具 + agentic loop + 四条策略 + LangSmith tracing。
+- **真实语料评测（✅）**：`corpus_multihop.py` + `retriever_bm25.py` + `eval_multihop.py`，MultiHop-RAG 上 agentic vs 单次；grok-4.5 · n=6 试点 **coverage +0.38 / hit +0.17**，并暴露 faithful −0.17、avg_search 5.5（越过停机上限）。
+- **LangSmith 评测（✅）**：`eval_multihop.py --langsmith` 把自定义指标（含 coverage）包装成 LangSmith evaluator，一键推 dataset + experiment。
+- **向量后端（可选）**：`BM25Retriever` → `VectorRetriever`（chroma + bge），同协议、上层不动；再跑 MuSiQue（对抗多跳）加码。
 
 ---
 
 ## 十一、一句话面试话术
 
-> 「我把 RAG 拆两段：建库是离线基础设施、不是工具；真正 agentic 的是**检索侧的决策**。所以我先把**过程层**做扎实——
-> 模型自己决定该不该查、多跳改写、什么时候停、查不到就拒答——再用 LangSmith 把这些**量化**（检索次数、忠实度、
-> agentic vs 单次的 delta）。真实语料（MultiHop-RAG）上多跳覆盖 +0.14，但也实测到弱模型会把忠实度带崩——
-> **收益和风险都被模型能力放大**。检索后端是可替换接口，换语料时上层零改动。**知道什么时候不该检索，比会检索更值钱。**」
+> 「我把 RAG 拆两段：建库是离线基础设施、不是工具；真正 agentic 的是**检索侧的决策**。所以我把**过程层**做扎实——
+> 模型自己决定该不该查、多跳改写、什么时候停、查不到就拒答——再用确定性指标 + LangSmith 把这些**量化**（检索次数、
+> 忠实度、agentic vs 单次的 delta）。真实语料（MultiHop-RAG）上多跳覆盖 **+0.38 / hit +0.17**，但也实测到多跳会把
+> 忠实度带崩、越过停机上限——**收益和风险都被模型能力放大**。检索后端是可替换接口，换语料/换向量时上层零改动。
+> **知道什么时候不该检索，比会检索更值钱。**」

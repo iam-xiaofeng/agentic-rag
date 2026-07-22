@@ -73,19 +73,3 @@ METRICS = {
     "hit": retrieval_hit,
     "discipline": retrieval_discipline,
 }
-
-
-if __name__ == "__main__":  # 离线自检，无需模型
-    ok = Example("q", "Rust", ["quartz/overview.md"], "multihop")
-    good = {"answer": "It is written in Rust [source: quartz/overview.md].",
-            "sources": ["nimbus/architecture.md", "quartz/overview.md"], "n_search": 2}
-    assert correctness(ok, good) == 1.0 and faithfulness(ok, good) == 1.0
-    assert retrieval_hit(ok, good) == 1.0 and retrieval_discipline(ok, good) == 1.0
-    neg = Example("q", "", [], "negative")
-    assert correctness(neg, {"answer": "I don't know — not in the knowledge base.",
-                             "sources": [], "n_search": 3}) == 1.0
-    nr = Example("q", "42", [], "no_retrieve")
-    assert retrieval_discipline(nr, {"answer": "42", "sources": [], "n_search": 2}) == 0.0
-    bad_cite = {"answer": "Rust [source: made-up.md].", "sources": ["quartz/overview.md"], "n_search": 1}
-    assert faithfulness(ok, bad_cite) == 0.0
-    print("eval_metrics 自检: OK")

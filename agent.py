@@ -30,7 +30,7 @@ from langchain_openai import ChatOpenAI
 from langgraph.prebuilt import create_react_agent
 
 from prompts import AGENTIC_RAG_SYSTEM
-from retriever import InMemoryRetriever, Retriever
+from retriever import Retriever
 from tools import make_rag_search
 
 
@@ -56,7 +56,6 @@ def build_model() -> ChatOpenAI:
     )
 
 
-def build_agent(retriever: Retriever | None = None):
-    retriever = retriever or InMemoryRetriever()
+def build_agent(retriever: Retriever):
     tools = [make_rag_search(retriever)]
     return create_react_agent(build_model(), tools, prompt=AGENTIC_RAG_SYSTEM)

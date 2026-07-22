@@ -1,4 +1,4 @@
-"""真实语料上的 BM25 检索器（P3）—— 与 InMemoryRetriever 同一套 `Retriever` 协议。
+"""真实语料上的 BM25 检索器（P3）—— 实现同一套 `Retriever` 协议。
 
 因为它实现的是完全相同的 `search(query, k) -> list[Hit]` 接口，agent.py / tools.py /
 eval_* 全都**不用改**，只换后端。这正是「把检索藏在协议后面」的意义。

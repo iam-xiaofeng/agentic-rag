@@ -1,11 +1,12 @@
 """P3 评测：在 MultiHop-RAG（真实语料，BM25 后端）上对比 agentic vs 单次检索。
 
-    .venv/bin/python eval_multihop.py            # 默认 12 题
-    .venv/bin/python eval_multihop.py --n 20     # 更大样本（更费 token）
+    .venv/bin/python eval_multihop.py                     # 默认 12 题
+    .venv/bin/python eval_multihop.py --n 20              # 更大样本（更费 token）
+    .venv/bin/python eval_multihop.py --n 20 --langsmith  # 另把 dataset+experiment 推到 LangSmith
 
 需要模型凭据（OPENAI_BASE_URL / OPENAI_API_KEY / RAG_MODEL；若网关 WAF 拦 UA 再加 RAG_USER_AGENT）。
 
-与玩具库的区别：这里 gold 证据分散在约 4k 个片段中的 2~4 篇，单次 BM25 查询在结构上
+与玩具库的区别：这里 gold 证据分散在约 6k 个片段中的 2~4 篇，单次 BM25 查询在结构上
 必然「欠覆盖」证据链，所以我们预期 agentic 的多轮改写能提升 **检索覆盖率(coverage)**，
 进而提升 **正确率(correct)**。两项都报，并给出 agentic - 单次 的 delta。
 
@@ -18,14 +19,30 @@
 from __future__ import annotations
 
 import argparse
+import re
 
 from agent import build_agent
 from corpus_multihop import load_corpus, load_examples
 from eval_baseline import single_shot
 from eval_dataset import Example
 from eval_metrics import METRICS
-from eval_run import run_agentic
 from retriever_bm25 import BM25Retriever
+
+
+def run_agentic(question: str, agent) -> dict:
+    """跑 agentic agent，抽出 answer + 检索到的 sources + 检索次数。"""
+    answer, sources, n = "", [], 0
+    for chunk in agent.stream({"messages": [("user", question)]}, stream_mode="values"):
+        m = chunk["messages"][-1]
+        mtype = getattr(m, "type", "")
+        for tc in getattr(m, "tool_calls", None) or []:
+            if tc["name"] == "rag_search":
+                n += 1
+        if mtype == "tool" and getattr(m, "name", None) == "rag_search":
+            sources += re.findall(r"\[source:\s*([^\]]+)\]", m.content or "")
+        if mtype == "ai" and (m.content or "").strip() and not getattr(m, "tool_calls", None):
+            answer = m.content
+    return {"answer": answer, "sources": sources, "n_search": n}
 
 
 def _pick(lst: list, m: int) -> list:
@@ -79,6 +96,8 @@ def _summary(label: str, rows: list[dict]) -> dict:
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--n", type=int, default=12, help="评测题数")
+    ap.add_argument("--langsmith", action="store_true",
+                    help="另把 dataset + experiment + evaluators 推到 LangSmith")
     args = ap.parse_args()
 
     print("在 MultiHop-RAG 语料上构建 BM25 索引 ...")
@@ -117,6 +136,56 @@ def main() -> None:
     print("\n== DELTA (agentic - single) ==")
     for k in list(METRICS) + ["coverage"]:
         print(f"  {k:11s}: {a[k] - b[k]:+.2f}")
+
+    if args.langsmith:
+        _push_to_langsmith(agent, data)
+
+
+def _push_to_langsmith(agent, data: list[Example]) -> None:
+    """把 MultiHop-RAG 抽样 + 自定义指标推成 LangSmith dataset + experiment。
+
+    面向 langsmith>=0.1 的 evaluate()：它会用 LangSmith 的 harness 对每条样例重新跑一遍
+    target（= 再调用一次 agent），再用下列 evaluator 打分。自定义指标（含 coverage）通过
+    _make/_cov 适配成 (run, example)->score 的评估器 —— 这就是「把自己的指标注册进 LangSmith」
+    的标准写法。不同 langsmith 版本 evaluator 签名略有差异，按装的版本微调。
+    """
+    from langsmith import Client, evaluate
+
+    client = Client()
+    name = "agentic-rag-multihop"
+    if not client.has_dataset(dataset_name=name):
+        ds = client.create_dataset(name)
+        client.create_examples(
+            dataset_id=ds.id,
+            inputs=[{"question": e.question} for e in data],
+            outputs=[{"reference": e.reference, "sources": e.sources, "kind": e.kind}
+                     for e in data],
+        )
+
+    def target(inputs: dict) -> dict:
+        return run_agentic(inputs["question"], agent)
+
+    def _ex(example) -> Example:
+        return Example(example.inputs["question"], example.outputs["reference"],
+                       example.outputs["sources"], example.outputs["kind"])
+
+    def _make(metric_name, fn):
+        def scorer(run, example):
+            return {"key": metric_name, "score": fn(_ex(example), run.outputs)}
+        return scorer
+
+    def _cov(run, example):
+        c = _coverage(_ex(example), run.outputs)
+        return {"key": "coverage", "score": 0.0 if c is None else c}
+
+    evaluate(
+        target,
+        data=name,
+        evaluators=[_make(k, f) for k, f in METRICS.items()] + [_cov],
+        experiment_prefix="agentic-rag-multihop",
+        client=client,
+    )
+    print("\n[langsmith] 已推送 dataset + experiment 'agentic-rag-multihop'。")
 
 
 if __name__ == "__main__":

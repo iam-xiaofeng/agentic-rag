@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 from agent import build_model
-from retriever import InMemoryRetriever, Retriever
+from retriever import Retriever
 
 # 喂给模型的功能性系统提示（保留英文：评测数字基于此文案）。
 _BASELINE_SYSTEM = (
@@ -16,9 +16,8 @@ _BASELINE_SYSTEM = (
 )
 
 
-def single_shot(question: str, retriever: Retriever | None = None) -> dict:
+def single_shot(question: str, retriever: Retriever) -> dict:
     """一次检索、一次生成。无迭代、无改写。"""
-    retriever = retriever or InMemoryRetriever()
     hits = retriever.search(question, k=4)
     sources = [h.doc.source for h in hits]
     context = "\n\n".join(

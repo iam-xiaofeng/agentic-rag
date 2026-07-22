@@ -47,7 +47,7 @@ def load_corpus(path: str | pathlib.Path | None = None) -> list[Doc]:
         title = (a.get("title") or a.get("url") or "untitled").strip()
         for j, ck in enumerate(_chunks(a.get("body") or "")):
             # 每个片段都拼上标题，让标题里的实体词在任何片段中都可被检索到
-            docs.append(Doc(id=f"{title}#{j}", text=f"{title}\n{ck}", source=title))
+            docs.append(Doc(id=f"{title}#{j}", text=f"{title}\n{ck}", source=(a.get("source") or "")))
     return docs
 
 
@@ -72,15 +72,3 @@ def load_examples(path: str | pathlib.Path | None = None) -> list[Example]:
             kind=kind,
         ))
     return out
-
-
-if __name__ == "__main__":  # 离线冒烟测试，无需模型
-    docs = load_corpus()
-    exs = load_examples()
-    import collections
-    print(f"语料：  {len(docs)} 个片段（来自 data/corpus.json）")
-    print(f"样例：  {len(exs)} 条（{collections.Counter(e.kind for e in exs)}）")
-    print(f"示例文档: [{docs[0].source[:50]}] {docs[0].text[:70]!r}")
-    mh = next(e for e in exs if e.kind == "multihop")
-    print(f"示例多跳: gold_sources={len(mh.sources)}  ans={mh.reference[:40]!r}")
-    print(f"  q: {mh.question[:90]}")
