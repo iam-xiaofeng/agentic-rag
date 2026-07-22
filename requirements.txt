@@ -1,0 +1,9 @@
+langgraph>=0.2
+langchain-openai>=0.2
+langchain-core>=0.3
+langsmith>=0.1
+python-dotenv>=1.0    # 启动时把 .env 读进 os.environ（见 agent.py）
+rank-bm25>=0.2        # P3 真实语料的 BM25 检索后端（retriever_bm25.py）
+
+# P2 (eval):  ragas  datasets
+# P3 (real corpus):  chromadb  sentence-transformers
