@@ -35,6 +35,7 @@ RAG = **检索(retrieve) → 拼上下文(augment) → 生成(generate)**。**�
 ```
 agentic-rag/
 ├── README.md            # 本文件
+├── EXPERIMENTS.md       # 5 次实验的设置 / 命令 / 数据 / 结论（LangSmith 可复现）
 ├── requirements.txt     # 依赖：sentence-transformers / rank-bm25 / openevals / langchain-openai / langgraph / langsmith
 ├── .env.example         # 配置模板（复制成 .env 填真实值）
 ├── .env                 # 真实密钥（已 gitignore；模型 + LangSmith 凭据）
@@ -174,42 +175,30 @@ class Retriever(Protocol):
 
 ## 七、实测结果
 
-### 真实语料 MultiHop-RAG（hybrid + reranker · judge = grok · n=6 试点）
+> 完整的 5 次实验（设置 / 命令 / 数据 / 结论）都记在 **[`EXPERIMENTS.md`](EXPERIMENTS.md)**；这里只放两张最能打的表。
 
-当前默认模型 **bge-large-en-v1.5 + bge-reranker-v2-m3**（GPU）：
+**① 瓶颈在检索召回、不在幻觉**（单次流水线 · `multihop-rag` n=12 · LangSmith `hybrid-on-multihop-rag-*`）：
 
-| 指标 | 均分 | 说明 |
-|---|---|---|
-| **groundedness**（忠实度） | **0.98** ✅ | 几乎零幻觉——生产 RAG 最要命的一项，稳 |
-| retrieval_relevance（检索质量） | 0.65 | 见下「小样本警告」 |
-| correctness（正确率） | 0.49 | 6 题里 3 满分、3 失败 |
-| helpfulness | 0.48 | 跟随正确率（查不到就诚实认怂） |
-
-**⚠️ 小样本警告——别拿 6 个样本给模型选型下结论**：
-
-| 同 n=6 对照 | correct | ground | retr | help |
-|---|---|---|---|---|
-| bge-small + reranker-base | 0.67 | 1.00 | 0.72 | 0.67 |
-| **bge-large + reranker-v2-m3**（现默认） | 0.49 | 0.98 | 0.65 | 0.48 |
-
-- **换更大的模型在这 6 题上没有可辨识的提升**——groundedness 两组都 ~1.0，其余差异**全在噪声内**（就一道题从满分翻成失败，均值被拉低 0.15+）。
-- 原因：n=6 太小 + LLM-judge（grok）**不完全可复现**；而且「更大的模型 ≠ 每条 query 都更好」，检索质量是**逐 query** 的。
-- **结论**：要真分辨模型 / 参数好坏，得把 `--n` 拉到 **20~30+** 才有统计意义——这本身是个诚实的工程教训。
-- 唯一稳的信号：**不管大小模型，grounded 生成 + `[source:]` 纪律把幻觉压到近 0**；失败集中在「证据分散多篇」的难多跳——正是并存的 agentic 多跳（`run_agentic.py`）要补的地方。**强检索与 agentic 多跳正交、互补。**
-
-### LangSmith 数据集实验（`multihop-rag` · n=12 · 含 context_recall）
-
-在上传的全量数据集上跑一次（`eval_rag.py --dataset multihop-rag --n 12`），比本地多一个**确定性 `context_recall`**（gold 文章标题 ∩ 检索到的 source，不花 LLM）：
-
-| correctness | groundedness | retrieval_relevance | helpfulness | **context_recall** |
+| correctness | groundedness | retrieval_relevance | helpfulness | context_recall |
 |---|---|---|---|---|
 | 0.42 | **1.00** | 0.64 | 0.52 | **0.64** |
 
-- **瓶颈定位清楚**：`groundedness` 满分（零幻觉），但 `context_recall` 只有 **0.64**——难多跳的 gold 证据分散在 2~4 篇，单次检索只捞到约 2/3，`correctness`(0.42) 因此被**检索召回**卡住，**不是模型幻觉**。
-- `retrieval_relevance`（LLM judge，0.64）和确定性 `context_recall`（0.64）**几乎一致**——两个独立口径互相印证。
-- **提升方向**：补召回（更多跳 / 更大 `pool` / 更好融合），或直接上并存的 **agentic 多跳**（`run_agentic.py`）——正是它的用武之地。
+`groundedness` 满分 = 零幻觉；但 `correctness` 被 `context_recall`(0.64) 卡住——证据分散 2~4 篇，单次只捞 2/3，模型没证据就诚实拒答。（`topk` 4→8 可把召回 0.52→0.68，见 EXPERIMENTS 实验 3。）
 
-> 复现：`python eval_rag.py --dataset multihop-rag --n 12`（结果落 LangSmith experiment `hybrid-on-multihop-rag-*`）；本地小样对照：`python eval_rag.py --n 6`。
+**② agentic 多跳 · 100 题 · 按 question_type**（LangSmith `agentic-on-multihop-rag-*`）：
+
+| type | correctness | groundedness | retrieval_rel | helpfulness | context_recall | refused |
+|---|---|---|---|---|---|---|
+| comparison | 0.81 | 0.74 | 0.61 | 1.00 | 0.75 | 0.08 |
+| inference | **1.00** | 0.71 | 0.86 | 1.00 | 0.58 | 0.00 |
+| temporal | 0.58 | 0.73 | 0.53 | 0.96 | 0.69 | 0.24 |
+| null | – | 0.95 | 0.03 | 0.35 | – | **0.84** |
+
+- **多跳把 correctness 拉到 ~0.80**（vs 单次 0.42）：inference 满分、temporal 最难、null **84% 正确拒答**。
+- **代价：groundedness ~1.00 → ~0.73**——多跳合成多篇、断言更多，不如单次贴原文忠实。**收益与风险都被放大**（贯穿全项目的一条主线）。
+- 受控对比（同题、同检索器）：agentic `context_recall` **0.73 > 单次池顶 0.65**，捞回单次任何 topk 都够不着的 gold；但会 query drift、平均 4 跳 ~4× 成本（EXPERIMENTS 实验 4）。
+
+> **一句话：多跳不是万能钥匙，是"用忠实度和成本换覆盖与正确率"的可量化选择。** 全部实验在 LangSmith 数据集 `multihop-rag` 上可复现，细节见 [`EXPERIMENTS.md`](EXPERIMENTS.md)。
 
 ---
 
