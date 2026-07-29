@@ -25,7 +25,7 @@ from langsmith import Client, evaluate
 
 from agent import build_agent
 from corpus_multihop import load_corpus
-from eval_common import SPECS, call_judge, context_recall_fact, make_judges, refused
+from eval_common import REFUSAL, SPECS, call_judge, context_recall_fact, make_judges, refused
 from llm import build_judge, build_model
 from retriever_hybrid import HybridRetriever
 
@@ -37,6 +37,62 @@ _SRC = re.compile(r"\[source:\s*([^\]]+)\]")
 def _type_map() -> dict[str, str]:
     raw = json.loads((DATA / "MultiHopRAG.json").read_text(encoding="utf-8"))
     return {r["query"]: r.get("question_type", "?") for r in raw}
+
+
+def _norm(s: str) -> str:
+    return re.sub(r"\s+", " ", (s or "").lower()).strip()
+
+
+def _run_local(picked, qtype, target, out: pathlib.Path, concurrency: int) -> None:
+    """本地跑 agent + 确定性指标，逐题写 JSONL（`example_id` 用于**同题配对**）。
+
+    为什么要有这条路：检索侧改动该动的量是 `context_recall_fact`（确定性、零裁判噪声），
+    而 LLM-judge 的分在每型 8 题上标准误差就有 0.1~0.15——**把预算堆在裁判上，量到的全是噪声**。
+    去掉 4 次裁判调用后每题便宜 5 倍，同样的钱能把 n 抬到能区分效应的量级。
+    另：LangSmith 本月追踪配额已满（`evaluate()` 的 run 存不进去），本地路径顺带绕开它。
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    def one(ex):
+        facts = ex.outputs.get("reference_contexts") or []
+        row = {"example_id": str(ex.id), "question": ex.inputs["question"],
+               "type": qtype.get(ex.inputs["question"], "?").split("_")[0]}
+        try:
+            o = target(ex.inputs)
+        except Exception as e:                            # noqa: BLE001 —— 网关连续失败
+            return row | {"errored": f"{type(e).__name__}: {str(e)[:100]}"}
+        blob = _norm(" ".join(o["contexts"]))
+        return row | {
+            "n_search": o["n_search"],
+            "context_recall_fact": (sum(1 for f in facts if _norm(f)[:120] in blob) / len(facts)
+                                    if facts else None),
+            "refused": 1.0 if any(c in (o["answer"] or "").lower() for c in REFUSAL) else 0.0,
+            "answer_len": len(o["answer"] or ""),
+        }
+
+    with ThreadPoolExecutor(max_workers=concurrency) as pool:
+        rows = list(pool.map(one, picked))
+    out.write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in rows), encoding="utf-8")
+
+    ok = [r for r in rows if "errored" not in r]
+    n_err = len(rows) - len(ok)
+    print(f"\n== 本地确定性指标（逐题结果已写入 {out}）==")
+    print(f"{'type':12s}{'n有效':>6}{'context_recall_fact':>22}{'n_search':>10}{'refused':>9}{'答案长度':>10}")
+    for t in ("comparison", "inference", "temporal", "null"):
+        d = [r for r in ok if r["type"] == t]
+        if not d:
+            continue
+        cr = [r["context_recall_fact"] for r in d if r["context_recall_fact"] is not None]
+        print(f"{t:12s}{len(d):>6}{(sum(cr) / len(cr) if cr else float('nan')):>22.3f}"
+              f"{sum(r['n_search'] for r in d) / len(d):>10.2f}"
+              f"{sum(r['refused'] for r in d) / len(d):>9.2f}"
+              f"{sum(r['answer_len'] for r in d) / len(d):>10.0f}")
+    if n_err:
+        print(f"\n⚠️ {n_err} 题网关连续失败，已记 errored 并排除（**不当 0 分**）。")
+    zero = [r for r in ok if r["n_search"] == 0]
+    if zero:
+        print(f"⚠️ {len(zero)}/{len(ok)} 题 agent **一次都没检索** —— 这些题的 context_recall_fact=0 "
+              f"是**模型没查**，不是检索器没捞到，别混为一谈。")
 
 
 def main() -> None:
@@ -51,6 +107,11 @@ def main() -> None:
     ap.add_argument("--model", default=None,
                     help="**答题**模型（缺省读 .env 的 RAG_MODEL）。裁判模型固定为 RAG_MODEL 不受影响——"
                          "换裁判等于换尺子，分数就不可比了")
+    ap.add_argument("--local", metavar="OUT.jsonl", default=None,
+                    help="只跑 agent + **确定性**指标（context_recall_fact / refused / n_search），"
+                         "跳过 4 个 LLM 裁判与 LangSmith evaluate，每题**便宜 5 倍**，并把逐题结果写成 "
+                         "JSONL 供**同题配对**比较。用于检索侧改动的 A/B：judge 分在 n=8 上的噪声"
+                         "（SE≈0.1~0.15）远大于效应量，把预算堆在裁判上是浪费——先把确定性指标测准。")
     args = ap.parse_args()
 
     types = [f"{t.strip()}_query" if not t.strip().endswith("_query") else t.strip()
@@ -79,15 +140,28 @@ def main() -> None:
     judges = make_judges(build_judge())        # 裁判恒为 RAG_JUDGE_MODEL/RAG_MODEL，跨实验可比
 
     def _run_once(question: str) -> dict:
-        got, contexts, answer = set(), [], ""
+        """跑完一题，从**终态的完整消息列表**里取工具返回。
+
+        ⚠️ 曾经的写法是在 `stream(stream_mode="values")` 的每个事件里只读 `messages[-1]`——
+        **同一轮里的并行 tool 调用会被吞掉**（实测 2 次检索只捕到 1 次，`context_recall_fact`
+        被报成 0.500 而真值是 1.000）。**这个 bug 只会让检索看起来更差**，于是"召回上不去"的
+        表象里有一部分其实是评测自己造成的。终态里 messages 是全的，直接遍历它。
+        """
+        state = None
         for chunk in agent.stream({"messages": [("user", question)]}, stream_mode="values"):
-            m = chunk["messages"][-1]
-            if getattr(m, "type", "") == "tool" and getattr(m, "name", None) == "rag_search":
-                got |= set(_SRC.findall(m.content or ""))
-                contexts.append(m.content or "")
+            state = chunk
+        msgs = (state or {}).get("messages", [])
+        contexts = [m.content or "" for m in msgs
+                    if getattr(m, "type", "") == "tool" and getattr(m, "name", None) == "rag_search"]
+        got: set[str] = set()
+        for c in contexts:
+            got |= set(_SRC.findall(c))
+        answer = ""
+        for m in msgs:
             if getattr(m, "type", "") == "ai" and (m.content or "").strip() and not getattr(m, "tool_calls", None):
                 answer = m.content
-        return {"answer": answer, "sources": sorted(got), "contexts": contexts}
+        return {"answer": answer, "sources": sorted(got), "contexts": contexts,
+                "n_search": len(contexts)}
 
     def target(inputs: dict) -> dict:
         """网关 502/524 会整题打空 → **绝不能吞掉**：吞了就变成 correctness=0 计入均值，
@@ -114,7 +188,20 @@ def main() -> None:
             return {"key": name, "score": r["score"], "comment": r.get("comment")}
         return scorer
 
-    evaluators = [_adapt(k, judges[k]) for k in SPECS] + [context_recall_fact, refused]
+    def n_search(run, example) -> dict:
+        """这一题 agent 到底检索了几次。
+
+        没有它，"**模型压根没查**"与"**检索器没捞到**"在 `context_recall_fact` 上长得一模一样
+        （都是 0.000），归因就会全错——实测 deepseek 有的题一次都不查（实验13 已记 它平均只查
+        1.1~1.5 次）。**失败必须可见**，这是本项目第 N 次栽在同一件事上。"""
+        return {"key": "n_search", "score": float((run.outputs or {}).get("n_search", 0))}
+
+    evaluators = [_adapt(k, judges[k]) for k in SPECS] + [context_recall_fact, refused, n_search]
+
+    if args.local:
+        _run_local(picked, qtype, target, pathlib.Path(args.local), args.concurrency)
+        return
+
     results = evaluate(target, data=picked, evaluators=evaluators,
                        experiment_prefix=f"agentic-{args.reranker}-{(args.model or 'default').split('/')[-1]}-on-{args.dataset}",
                        max_concurrency=args.concurrency, client=client)
@@ -131,7 +218,8 @@ def main() -> None:
             for er in (row["evaluation_results"]["results"] or []):
                 if er.score is not None:
                     agg[t][er.key].append(er.score)
-        metrics = ["correctness", "groundedness", "retrieval_relevance", "helpfulness", "context_recall_fact", "refused"]
+        metrics = ["correctness", "groundedness", "retrieval_relevance", "helpfulness",
+                   "context_recall_fact", "refused", "n_search"]
         print("\n== 按 question_type 均值 ==")
         print(f"{'type':11s} " + " ".join(f"{m[:9]:>10}" for m in metrics) + "     n有效")
         for t in ["comparison", "inference", "temporal", "null"]:

@@ -9,9 +9,16 @@ agent 只管检索。
 
 from __future__ import annotations
 
+import os
+
 from langchain_core.tools import StructuredTool
 
 from retriever import Retriever
+
+# k=32 而不是 16：chunk 从 1200 缩到 600 后（实验19-20），同样的 k 只交付一半字符。
+# 32×516 ≈ 16.5k 字符 ≈ 旧配置 16×1042，**上下文预算不变**，而重排后 fact 级召回三类均值
+# 0.749 → 0.779（每型 60 题实测，三个题型齐涨）。RAG_TOPK 可在 shell 层覆盖，用于新旧配置 A/B。
+_TOPK = int(os.environ.get("RAG_TOPK", 32))
 
 # 明确的「查无」哨兵：引导模型换关键词重试，或在试过几个角度后如实告知库里没有答案。
 _NO_RESULTS = (
@@ -25,7 +32,7 @@ def make_rag_search(retriever: Retriever) -> StructuredTool:
     """把一个 retriever 绑成 `rag_search` LangChain 工具。"""
 
     def rag_search(query: str) -> str:
-        hits = retriever.search(query, k=16)
+        hits = retriever.search(query, k=_TOPK)
         if not hits:
             return _NO_RESULTS
         return "\n\n".join(

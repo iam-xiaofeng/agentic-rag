@@ -10,3 +10,5 @@ data/
 # 后台评测/诊断的运行日志（结论已归档进 EXPERIMENTS.md，日志本身不入库）
 *.out
 *.err
+# eval_agentic.py --local 的逐题结果（用于配对分析，数据量大且可重跑）
+ab_*.jsonl

@@ -35,7 +35,7 @@ RAG = **检索(retrieve) → 拼上下文(augment) → 生成(generate)**。**�
 ```
 agentic-rag/
 ├── README.md            # 本文件
-├── EXPERIMENTS.md       # 18 次实验的设置 / 命令 / 数据 / 结论（LangSmith 可复现）
+├── EXPERIMENTS.md       # 21 次实验的设置 / 命令 / 数据 / 结论（含被后续实验推翻的条目，原文保留 + 订正标注）
 ├── requirements.txt     # 依赖：sentence-transformers / chromadb / rank-bm25 / openevals / langchain-openai / langgraph / langsmith
 ├── .env.example         # 配置模板（复制成 .env 填真实值）
 ├── .env                 # 真实密钥（已 gitignore；模型 + LangSmith 凭据）
@@ -58,9 +58,11 @@ agentic-rag/
 ├── run_agentic.py       # CLI：跑 agentic 检索，逐步打印每次改写 / 停
 │
 │  ── 语料 + 评测 ──
-├── corpus_multihop.py   # 加载 data/ 的 MultiHop-RAG（609 篇 → 6711 片段 + 2556 问）
+├── corpus_multihop.py   # 加载 data/ 的 MultiHop-RAG（609 篇 → 15172 片段 + 2556 问）
 ├── eval_dataset.py      # Example 数据类（评测样例的共享类型）
 ├── eval_rag.py          # openevals 4 个 LLM-judge + 可 --upload 推 LangSmith
+├── eval_agentic.py      # agentic 多跳评测（按 question_type 均衡）；--local 只跑确定性指标、逐题落 JSONL 供配对
+├── eval_rebuild.py      # ★ 逐层重建的验收脚本：--layer 0 前置自检 / 1 chunk / 2 融合 / 3 重排（确定性、免费）
 ├── langsmith_upload.py  # 把全量 MultiHop-RAG（含 gold 证据 fact）传成 LangSmith 数据集
 └── data/                # ← MultiHop-RAG 语料（已 gitignore；见「第三节」）
     ├── corpus.json          # 609 篇新闻全文
@@ -79,7 +81,7 @@ agentic-rag/
   - `corpus.json`：609 篇新闻（`title` 标题 / `body` 正文 / `source` 媒体 / …）——**被检索的语料**。
   - `MultiHopRAG.json`：2556 个问题（`query` / `answer` 标准答案 / `question_type` / `evidence_list` gold 证据）——**评测集**。
 - **我们怎么用**（`corpus_multihop.py`）：
-  - `load_corpus()`：每篇 `body` 用 **递归切分**（`RecursiveCharacterTextSplitter`，优先 `\n\n`→`\n`→句子边界，1200 字符 / 重叠 150）切块、拼上标题 → **6711 个 `Doc`**（`source = 文章标题`，与 gold 证据标题对齐）。
+  - `load_corpus()`：每篇 `body` 用 **递归切分**（`RecursiveCharacterTextSplitter`，优先 `\n\n`→`\n`→句子边界，**600 字符 / 重叠 150**）切块、拼上标题 → **15172 个 `Doc`**（`source = 文章标题`，与 gold 证据标题对齐）。切分参数是整条栈最上游的旋钮，选型过程见 EXPERIMENTS 实验 17-19。
   - `load_examples()`：每个问题 → 一条 `Example`（`question` / `reference=answer` / `sources=gold 标题` / `kind`）。
 
 ### 如何重新下载
@@ -89,7 +91,7 @@ cd agentic-rag && mkdir -p data
 curl -sL https://huggingface.co/datasets/yixuantt/MultiHopRAG/resolve/main/corpus.json      -o data/corpus.json
 curl -sL https://huggingface.co/datasets/yixuantt/MultiHopRAG/resolve/main/MultiHopRAG.json -o data/MultiHopRAG.json
 # 离线自检（无需模型）：
-.venv/bin/python -c "from corpus_multihop import load_corpus, load_examples; print(len(load_corpus()), '片段', len(load_examples()), '例')"  # 6711 片段 2556 例
+.venv/bin/python -c "from corpus_multihop import load_corpus, load_examples; print(len(load_corpus()), '片段', len(load_examples()), '例')"  # 15172 片段 2556 例
 ```
 
 ---
@@ -105,7 +107,7 @@ cp .env.example .env                    # 填 OPENAI_API_KEY / OPENAI_BASE_URL /
 # 1) 免费离线自检（不调模型）：语料加载 + 分块
 python -c "from corpus_multihop import load_corpus, load_examples; print(len(load_corpus()), '片段', len(load_examples()), '例')"
 
-# 2) 跑 hybrid 检索（首次会下 bge 模型 + 编码 6711 片段，之后走 .cache 缓存）
+# 2) 跑 hybrid 检索（首次会下 bge 模型 + 编码 15172 片段，之后走 .cache 缓存）
 python run.py "Who is the individual associated with the cryptocurrency industry facing a criminal trial?"
 python run.py --no-gen "..."           # 只看检索排名，不调生成模型
 
@@ -143,11 +145,12 @@ class Retriever(Protocol):
 
 **HybridRetriever 的三步**（`retriever_hybrid.py`）：
 
-1. **召回**：BM25、Dense 各取 top-`pool`(默认 100；见 EXPERIMENTS 实验 6，pool 是召回的主杠杆)。
+1. **召回**：BM25、Dense 各取 top-`pool`(默认 **200**)。pool 的**信息量**要与 chunk 匹配——`pool×chunk ≈ 恒定`；chunk 缩到 600 后 100→200 有收益、200→300 只涨池覆盖不涨交付（实验 19 ⑥）。
 2. **融合**：**RRF 倒数排名融合**（默认，`score = Σ w/(rrf_k+rank)`）——只看排名、不看分数，对 BM25(无上界) 与余弦([-1,1]) 不可比的量纲免疫（业界标配）；另留 min-max 加权(`fusion="minmax"`)做对照。默认权重均衡 `w_bm25 = w_dense = 0.5`。
 3. **重排**：融合候选池丢给 `bge-reranker-v2-m3`（cross-encoder），按 (query, passage) 相关性取 top-k。
 
-> 想调：`HybridRetriever(docs, fusion="rrf", w_dense=.7, pool=100, rrf_k=60)`；参数消融见 **EXPERIMENTS 实验 6**（`python eval_ablation.py`，免费、不调 LLM）。默认已用 `bge-large-en-v1.5`（1024 维）+ `bge-reranker-v2-m3`（GPU 上跑）；无显卡的机器可在 `retriever_dense.py` / `retriever_hybrid.py` 改回 `bge-small-en-v1.5` / `bge-reranker-base`。
+> 想调：`HybridRetriever(docs, fusion="rrf", w_dense=.7, pool=200, rrf_k=60)`；参数消融见 **EXPERIMENTS 实验 6 / 19**（`python eval_ablation.py`、`python eval_rebuild.py`，免费、不调 LLM）。默认已用 `bge-large-en-v1.5`（1024 维）+ `bge-reranker-v2-m3`（GPU 上跑）；无显卡的机器可在 `retriever_dense.py` / `retriever_hybrid.py` 改回 `bge-small-en-v1.5` / `bge-reranker-base`。
+> **整套配置可在 shell 层整体切换**做 A/B，不必改代码：`RAG_CHUNK_SIZE` / `RAG_CHUNK_OVERLAP` / `RAG_POOL` / `RAG_TOPK`。
 
 ---
 
@@ -175,7 +178,7 @@ class Retriever(Protocol):
 
 ## 七、实测结果
 
-> 完整的 18 次实验（设置 / 命令 / 数据 / 结论）都记在 **[`EXPERIMENTS.md`](EXPERIMENTS.md)**；这里只放两张最能打的表。
+> 完整的 21 次实验（设置 / 命令 / 数据 / 结论）都记在 **[`EXPERIMENTS.md`](EXPERIMENTS.md)**；这里只放最能打的几张表。
 
 **① 瓶颈在检索召回、不在幻觉**（单次流水线 · `multihop-rag` n=12 · LangSmith `hybrid-on-multihop-rag-*`）：
 
@@ -185,7 +188,21 @@ class Retriever(Protocol):
 
 `groundedness` 满分 = 零幻觉；但 `correctness` 被 `context_recall`(0.64) 卡住——证据分散 2~4 篇，单次只捞 2/3，模型没证据就诚实拒答。（`topk` 4→8 可把召回 0.52→0.68，见 EXPERIMENTS 实验 3。）
 
-**② agentic 多跳 · 100 题 · 按 question_type**（当前配置 RRF+Chroma+pool=100+k=8 · LangSmith `agentic-on-multihop-rag-d61482cc`）：
+**② 逐层重建检索栈**（实验 19-20 · 每型 60 题 · 确定性、免费、可复现 · `python eval_rebuild.py`）：
+
+| 层 | 改动 | 单点自检（给这层最有利的输入） | 结果 |
+|---|---|---|---|
+| BM25 | **不动** | 用证据句原文自查 top1 | 97~100%，全程健康 |
+| embedding | chunk 1200→**600**/overlap 150 | 同上，dense | **56% → 73%**，三类齐涨 |
+| 融合 | pool 100→**200** | 融合 ≥ 更好的那条单路腿？ | @4 **−0.026 → +0.022**（由负功转正） |
+| 重排 | 不动（bge） | 重排 ≥ 不重排？ | comparison/inference 显著为正，temporal 无可检出效应 |
+
+**等交付字符**下的 fact 级召回（重排后）：旧 `1200/pool100/@16` **0.749** → 新 `600/pool200/@32` **0.779**，**三个题型全部改善**（temporal +0.058）。若 `k` 不变，则**上下文减半而召回略高**（0.672 vs 0.650）。
+
+**③ 端到端 A/B（诚实版）**（实验 21 · 同模型同题配对 · n=87 · `deepseek-v4-pro`）：`context_recall_fact` 配对差 **+0.022，95% CI [−0.066, +0.105]** —— **测不出差异**，不能宣称端到端变好。原因见实验21 ③：agent 自己已经在做查询改写、方差被 agent 的非确定性主导，要分辨 0.03 需每型约 700 题。
+> **方法论：改动发生在哪一层，就在哪一层量。** 端到端该回答"这套系统整体行不行"，不该回答"我这个部件改好了没有"。
+
+**④ agentic 多跳 · 100 题 · 按 question_type**（⚠️ **旧配置** RRF+Chroma+pool=100+k=8 + 答题模型 grok-4.5 · LangSmith `agentic-on-multihop-rag-d61482cc`；grok 已从网关下线、配置也已换代，此表仅作历史参考）：
 
 | type | correctness | groundedness | retrieval_rel | helpfulness | context_recall | refused |
 |---|---|---|---|---|---|---|
@@ -197,14 +214,15 @@ class Retriever(Protocol):
 - **多跳 correctness ~0.82**（vs 单次 0.42）：inference 满分、temporal 最难、null 92% 正确拒答；groundedness 0.77。（表中 `context_recall` 是**标题级**口径，仅为与早期实验可比而保留——它是漏水的代理，见下条；现行评测已改用 fact 级 `context_recall_fact`，honest 值 ~0.63。）
 - **一条踩过、也修好的坑（含金量高）**：曾用 source 去重把 title 级 `context_recall` 刷到 0.89，correctness 却掉了——fact 级诊断发现去重在**游戏漏水的代理指标**、丢了真证据（Goodhart）。撤销去重、只留 `k=8` 后 correctness 反升到 **0.82**（实验 8-9）。**教训：盯 correctness / fact 级召回，别优化 title 级代理。**
 - **第二条坑（评测框架本身）**：`target()` 里一句 `except: return 空结果` 把网关 502 吞成空答案，被裁判打 **0 分并计入均值**，整轮实验读起来像"模型变差了"（实测 temporal 8 题空了 7 题）。修法：长退避重试 → 仍失败就 `raise`，让 LangSmith 标 **errored 并排除出均值**。**教训：评测里失败必须可见，不能降级成 0 分**（实验 12）。
-- **第三条坑，也是最贵的一条：聚合指标把 reranker 的负增益藏了两个月**（实验 15）。全题型平均说"重排在帮忙 +0.088"，**分题型一看，bge 在 temporal 上是净减益 −0.100**——51% 的 gold 证据 chunk 被它**往后推**，中位名次从第 6 推到第 9，正好越过 k=8 的门槛。**教训：任何"平均是正的"都要按子群拆开验一遍，否则一个子群的系统性伤害会被另一个子群的收益掩盖。**
-- **reranker 的价值必须分题型说**（实验 15，相对**不重排**的净值）：comparison **+0.244**、inference **+0.333**（Qwen3-4B 货真价实的大增益）；但 temporal 只有 **+0.011**（纯止损，天花板就是"什么都不做"的 0.522）。
-- **第四条坑：chunk 对比没控制住「交付信息量」**（实验 18）。实验11 用固定 `fact@8` 比不同 chunk——8 个 1200 字符的块 = 9600 字符、8 个 300 字符的块只有 2400 字符，**信息量差 4 倍**，小块必输。按**总字符对齐**重测后结论反转：**~500 字符才是甜点**（重排后三类均值 0.670 vs 现状 1200 的 0.633），且 **dense 精度只跟「块长」有关、跟「递归/按结构切」无关**（纯段落1000 与递归1200 自查同为 60%）。**建议配置：chunk=600 + overlap=150 + pool=200 + k≈16 —— 上下文减半、召回 0.615→0.656。**
-  > **300 更小反而更差**：证据句均长 157 字符，chunk=300 会**切断 11% 的证据句**（overlap 加到 150/200 也只救到 97%，块数却涨到 1200 的 5 倍）——**这是发生在检索之前的、不可恢复的损失**。由此得到一条可复用规则：**`chunk_overlap` 必须 ≥ 要检索的最小语义单元长度**。
-- **最贵的一条：embedding 在最简单的任务上只有 45% 命中率**（实验 17）。**用证据句的原文去检索包含该原文的 chunk**，dense 只有 45~63% 排到第 1，而 BM25 是 94~100%。排除了 Chroma（精确余弦与 HNSW 结果 **100% 一致**）后定位到 **chunk 1200 字符稀释了句子级语义**：chunk 缩到 300，dense 自查 top1 **45%→79%**，而 BM25 全程 98~100% 不动。**这个硬伤从项目第一天就在，被所有端到端指标漏掉了**——对症解法是 **small-to-big**（小块建索引检索 → 映射回父块交付，@4 +0.046）。
+- **第二条坑的复发（实验 21 ①）**：`_run_once` 在流式事件里只读 `messages[-1]`，**同一轮的并行 `rag_search` 被吞掉**——实测 2 次检索只捕获 1 次，`context_recall_fact` 报 0.500 而真值 1.000。**这个 bug 只会让检索看起来更差**，"召回上不去"的表象里有一部分是评测自己造的。同时新增确定性指标 **`n_search`**：此前"**模型压根没查**"（实测 90 题里有 6 题）与"**检索器没捞到**"在指标上长得一模一样，归因会全错。
+- **第三条坑：分子群分析救了我一次，又坑了我一次**（实验 15 → 实验 20）。实验15 分题型发现"bge 在 temporal 上净减益 **−0.100**、51% 的证据被往后推"，写成头条、进了 README、指导了后续三个实验的方向。**实验20 用同一配置把每型 15 题加到 60 题，这个数没能复现**：Δ@8 变成 **+0.031，95% CI [−0.042,+0.108]（不含 −0.100）**，"51% 被推后"变成 39% 被推后、中位名次 6→9 变成 8→7 **推前**。原因很朴素：**15 题的标准误差约 0.09，而结论依据的效应量是 0.10——信噪比约等于 1。** ⇒ **"按子群拆开验"这个动作是对的，但拆子群会让样本变小、更容易把噪声读成信号：分子群分析必须配置信区间。**
+- **reranker 的真实价值（实验 20，每型 60 题 + 配对 bootstrap）**：comparison **+0.13 [+0.07,+0.20]**、inference **+0.11 [+0.04,+0.18]**（@8，区间不跨 0，真效应）；temporal 四个 k 的区间**全部跨 0**、点估计正负横跳（+0.022/−0.039/−0.025/+0.028）——**不是负增益，是没有可检出的效应**。默认保留 bge。
+- **第四条坑：chunk 对比没控制住「交付信息量」**（实验 18）。实验11 用固定 `fact@8` 比不同 chunk——8 个 1200 字符的块 = 9600 字符、8 个 300 字符的块只有 2400 字符，**信息量差 4 倍**，小块必输。按**总字符对齐**重测后结论反转，且 **dense 精度只跟「块长」有关、跟「递归/按结构切」无关**（纯段落1000 与递归1200 自查同为 60%）。
+- **第五条坑：尺子本身对被比的变量不中立**（实验 19 ①）。我们从实验10 起用的 `fact@k` 只检查证据句的**前 120 字符**——**证据被切断它完全看不见**：chunk=400 时全句留存已掉到 89~95%，而"前120留存"仍报 100%。**于是块越小越占便宜**，实验18 的"~500 甜点"是被这把偏心的尺子量出来的，计入截断后落点是 **600**。⇒ **控制变量要控制到「指标本身」：先怀疑尺子，再怀疑被测对象。**
+- **最贵的一条：embedding 在最简单的任务上只有一半命中率**（实验 17 → 实验 19 修复）。**用证据句的原文去检索包含该原文的 chunk**，chunk=1200 时 dense 只有 **56%** 排到第 1，而 BM25 是 **98%**。排除了 Chroma 后定位到 **长块稀释句子级语义**。**这个硬伤从项目第一天就在，被所有端到端指标漏掉了。**
   > **教训：端到端指标必须配一组「单点能力自检」**——给每个部件最有利的输入，看它能否接近满分。否则某个部件长期半残，整体指标只会显示「就这样了」，不会告诉你是谁拖的。
-- **上游优化空间 ≈ 0，reranker 是唯一决定者**（实验 16）：**纯 BM25 单路 fact@8 0.522、纯 dense 0.344，相差 0.178——经过 reranker 后两者都变成 0.422**，`w_dense` 从 0 到 1 六个取值 temporal 交付一模一样。融合也从未提升交付（三类里持平或**低于 BM25 单路**），只提升覆盖；temporal 上它连覆盖都是负的（弱腿把强腿的好候选挤出 pool）。**pool/权重/融合方式只要不改覆盖，都会被下游抹平。**
-- **真正的出路在查询侧，不在排序侧**（实验 14）：**查询分解到事实层 + 每个子问句各自重排**，temporal fact@8 **0.578**——**唯一越过"不重排"天花板的做法**，且只花 1 次 LLM 调用、仍用便宜的 bge。对照：同义改写（MultiQueryRetriever 式）把池覆盖从 0.867 抬到 0.978，**交付却一位小数都没动**——扩大召回的收益被重排 100% 吃掉。
+- **融合层曾经是负资产，修好上游后才转正**（实验 16 → 实验 19 ④）。实验16 测得"融合从未提升交付、上游优化空间≈0"，**那是坏 dense 腿的下游症状**：chunk=1200 时融合相对更好单路腿在 @4 是 **−0.026（负功）**、@8 约等于 0；chunk 改成 600 后**每个 k 都是正的**（+0.022~+0.059）。⇒ **别把"坏输入下的表现"当成部件的固有属性。**
+- **查询分解（实验 14）的"唯一越过天花板"已失去依据**：它的对照基线"不重排 = 0.522"来自实验15 的同一批 15 题，而那批数据的 temporal 效应已证明落在噪声内。分解**可能仍然有效**，但需 n≥60 + 置信区间重测（尚未做）。
 
 
 > **一句话：多跳不是万能钥匙，是"用忠实度和成本换覆盖与正确率"的可量化选择。** 全部实验在 LangSmith 数据集 `multihop-rag` 上可复现，细节见 [`EXPERIMENTS.md`](EXPERIMENTS.md)。
@@ -215,11 +233,13 @@ class Retriever(Protocol):
 
 - **混合检索（✅）**：BM25 + bge dense 加权融合 + bge-reranker 重排，同一 `Retriever` 协议。
 - **LLM-judge 评测（✅）**：openevals 四轴（correctness / groundedness / retrieval_relevance / helpfulness），judge=网关模型，可 `--upload` 到 LangSmith。
-- **检索调优（✅）**：RRF 融合 + 参数消融（实验 6）——**pool 20→100 是主杠杆**，`rrf_k` / 权重在合理区间不敏感；瓶颈转移到 reranker 精度 + top-k。
+- **检索调优（✅）**：RRF 融合 + 参数消融（实验 6）——`rrf_k` / 权重在合理区间不敏感。**pool 不是独立杠杆**：它的**信息量**要与 chunk 匹配（`pool×chunk ≈ 恒定`，实验 19 ⑥），且**只涨池覆盖不改前排顺序时，不会变成交付**。
+- **逐层重建检索栈（✅，实验 19-21）**：BM25 不动 → embedding（chunk 1200→600）→ 融合（pool 100→200）→ 重排（保留 bge）。**每层两条验收缺一不可**：给这层最有利输入的**单点自检** + **按题型均衡**；从实验20 起再加**配对 bootstrap 置信区间**。脚本 `eval_rebuild.py --layer 0/1/2/3`，全程确定性、免费。
 - **更强 reranker（✅，评测级）**：`reranker_qwen.py` 提供 instruction-aware 的 **Qwen3-Reranker-4B**（`eval_agentic.py --reranker qwen`），fact 级交付显著优于 bge；代价 ~13s/次重排 + ~8GB 显存，故**默认仍是 bge**、4B 作评测/对照用（实验 11-12）。
-- **下一步不在检索侧**：池子加到 400（覆盖 100%）也换不来交付提升；temporal 的瓶颈是**查询-证据对不齐**，要做的是**查询分解 / 实体+日期结构化过滤**（实验 12）。
+- **下一步（待做，且必须带置信区间）**：① **查询分解**——实验14 的结论已因基线是 15 题点估计而失去依据（实验 20 ⑤），需 n≥60 重测；② temporal 的**实体+日期结构化过滤**；③ **端到端的功效问题**——现有基准 + deepseek（平均只检索 1.0~1.6 次）分辨不了 0.03 的效应，要么换更愿意多跳的答题模型，要么把结论建立在检索侧的高功效测量上（实验 21 ③）。
 - **答题模型可换、裁判要固定（✅）**：`eval_agentic.py --model <名>` 只换答题端，裁判走 `llm.build_judge()`（`RAG_JUDGE_MODEL`）不动；裁判模型下线时用 `eval_rescore.py` 拿新裁判把**存档 run** 统一重打分，旧实验照样可比（实验 13）。
-- **向量库（✅）**：`DenseRetriever` 已从内存 numpy 换成 **Chroma** 持久化向量库（`.cache/chroma/`，近邻检索）——同 `Retriever` 协议、上层一行不动；指标与 numpy 持平（HNSW 在此规模近似即精确）。
+- **配置可在 shell 层整体切换（✅）**：`RAG_CHUNK_SIZE` / `RAG_CHUNK_OVERLAP` / `RAG_POOL` / `RAG_TOPK` —— 新旧配置 A/B 不必改代码（实验 21）。
+- **向量库（✅）**：`DenseRetriever` 已从内存 numpy 换成 **Chroma** 持久化向量库（`.cache/chroma/`，近邻检索）——同 `Retriever` 协议、上层一行不动。⚠️ HNSW **只在 top1 上与精确余弦 100% 一致**；top100 的集合重合是 96%（`eval_rebuild.py --layer 0`）。差异落在 k 截断的边界上，重排后基本被吸收（绝对值差 ≤0.005）。
 - **agentic RAG（并存 ✅）**：`run_agentic.py`（create_agent，四策略），与流水线共用 `Retriever` 协议；最初的「agentic vs 单次」对比在 tag `v1-agentic-comparison`。
 - **历史归档**：自研确定性指标 + agentic-vs-单次对比脚本仍在 tag `v1-agentic-comparison`（未搬回 master）。
 

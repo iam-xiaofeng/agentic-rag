@@ -14,6 +14,8 @@
 
 from __future__ import annotations
 
+import os
+
 import numpy as np
 
 from retriever import Doc, Hit
@@ -21,6 +23,9 @@ from retriever_bm25 import BM25Retriever
 from retriever_dense import DenseRetriever
 
 _RERANKER = "BAAI/bge-reranker-v2-m3"
+# 池的**信息量**要与 chunk 匹配：pool×chunk ≈ 恒定（实验19 ⑥）。chunk=600 下 100→200 有收益、
+# 200→300 只涨池覆盖不涨交付。可用 RAG_POOL 在 shell 层覆盖，用于新旧配置整体 A/B。
+_POOL = int(os.environ.get("RAG_POOL", 200))
 
 
 def _minmax(x: np.ndarray) -> np.ndarray:
@@ -36,19 +41,26 @@ class HybridRetriever:
         docs: list[Doc],
         w_bm25: float = 0.5,
         w_dense: float = 0.5,
-        pool: int = 100,
+        pool: int = _POOL,
         reranker=_RERANKER,  # 模型名(→CrossEncoder) 或已构建的重排器对象(有 .predict，如 QwenReranker)
+                             # 或 None = 不加载重排器（只用 _fuse，给融合层的对照实验省显存）
         fusion: str = "rrf",
         rrf_k: int = 60,
         max_per_source: int | None = None,
+        bm25=None,
+        dense=None,
     ) -> None:
+        """`bm25` / `dense` 可传入任何满足 `Retriever` 协议的对象来替换默认两条腿——
+        参数实验里用它注入「精确余弦」的轻量 dense 探针，免得每个 chunk 配置都建一个 Chroma 库。"""
         self.docs = docs
-        self.bm25 = BM25Retriever(docs)
-        self.dense = DenseRetriever(docs)
+        self.bm25 = bm25 if bm25 is not None else BM25Retriever(docs)
+        self.dense = dense if dense is not None else DenseRetriever(docs)
         self.w_bm25, self.w_dense, self.pool = w_bm25, w_dense, pool
         self.fusion, self._rrf_k = fusion, rrf_k
         self.max_per_source = max_per_source
-        if hasattr(reranker, "predict"):          # 已构建的重排器对象（如 QwenReranker）→ 直接用
+        if reranker is None:                      # 不重排（只测召回/融合）
+            self.reranker = None
+        elif hasattr(reranker, "predict"):         # 已构建的重排器对象（如 QwenReranker）→ 直接用
             self.reranker = reranker
         else:                                     # 模型名字符串 → sentence-transformers CrossEncoder
             from sentence_transformers import CrossEncoder  # 延迟导入
@@ -92,6 +104,8 @@ class HybridRetriever:
         cands = self._fuse(query)
         if not cands:
             return []
+        if self.reranker is None:                           # 构造时 reranker=None → 直接交付融合顺序
+            return [Hit(doc=d, score=0.0) for d in cands[:k]]
         scores = np.asarray(self.reranker.predict([(query, d.text) for d in cands]))
         order = np.argsort(-scores)
         if not self.max_per_source:                         # None/0 → 不去重，直接取相关性 top-k

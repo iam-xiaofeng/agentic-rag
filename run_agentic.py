@@ -32,14 +32,17 @@ def main() -> None:
     print(f"构建 {args.retriever} 索引（首次会下 bge 模型 / 编码语料）...", file=sys.stderr)
     agent = build_agent(_RETRIEVERS[args.retriever](load_corpus()))
 
-    n = 0
+    n, shown = 0, 0
     for chunk in agent.stream({"messages": [("user", question)]}, stream_mode="values"):
-        m = chunk["messages"][-1]
-        for tc in getattr(m, "tool_calls", None) or []:
-            if tc["name"] == "rag_search":
-                n += 1
-                print(f"  ↳ rag_search #{n}: {tc['args'].get('query')!r}")
-        m.pretty_print()
+        # 按下标推进，而不是只看 messages[-1]：同一轮的并行 tool 调用会一次追加多条
+        # ToolMessage，只读最后一条会**漏打**（同类 bug 在 eval_agentic 里曾把召回读低）。
+        for m in chunk["messages"][shown:]:
+            for tc in getattr(m, "tool_calls", None) or []:
+                if tc["name"] == "rag_search":
+                    n += 1
+                    print(f"  ↳ rag_search #{n}: {tc['args'].get('query')!r}")
+            m.pretty_print()
+        shown = len(chunk["messages"])
 
     print(f"\n[过程] rag_search 次数: {n}")
 
