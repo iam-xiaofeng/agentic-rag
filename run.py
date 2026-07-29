@@ -4,7 +4,7 @@
     python run.py --topk 8 "..."                  # 看更多候选
     python run.py --no-gen "..."                  # 只看检索排序，不调模型
 
-首次运行会下 bge 模型并对 ~6194 个片段编码（之后走 .cache 缓存，秒级）。
+首次运行会下 bge 模型并对 ~6711 个片段编码（之后走 .cache 缓存，秒级）。
 """
 
 from __future__ import annotations

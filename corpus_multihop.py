@@ -19,23 +19,24 @@ from __future__ import annotations
 import json
 import pathlib
 
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+
 from eval_dataset import Example
 from retriever import Doc
 
 DATA = pathlib.Path(__file__).resolve().parent / "data"
 
+# 递归切分：优先按段落(\n\n)→行(\n)→句(". ")→词切，凑到 ~1200 字符、重叠 150。
+# 比旧版定长滑窗尊重语义边界（不把证据句拦腰切断），也不再先把 \n\n 压平。
+_SPLITTER = RecursiveCharacterTextSplitter(
+    chunk_size=1200, chunk_overlap=150,
+    separators=["\n\n", "\n", ". ", " ", ""], length_function=len,
+)
 
-def _chunks(text: str, size: int = 1200, overlap: int = 150):
-    """按字符窗口切块、带重叠（散文）。"""
-    text = " ".join((text or "").split())
-    if not text:
-        return
-    i = 0
-    while i < len(text):
-        yield text[i:i + size]
-        if i + size >= len(text):
-            break
-        i += size - overlap
+
+def _chunks(text: str) -> list[str]:
+    """递归切块：尊重 \\n\\n / \\n / 句子边界，凑到 ~1200 字符、重叠 150（见 _SPLITTER）。"""
+    return _SPLITTER.split_text((text or "").strip())
 
 
 def load_corpus(path: str | pathlib.Path | None = None) -> list[Doc]:

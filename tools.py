@@ -25,7 +25,7 @@ def make_rag_search(retriever: Retriever) -> StructuredTool:
     """把一个 retriever 绑成 `rag_search` LangChain 工具。"""
 
     def rag_search(query: str) -> str:
-        hits = retriever.search(query, k=4)
+        hits = retriever.search(query, k=16)
         if not hits:
             return _NO_RESULTS
         return "\n\n".join(

@@ -17,6 +17,8 @@ from retriever import Retriever
 from tools import make_rag_search
 
 
-def build_agent(retriever: Retriever):
-    """model →(rag_search → model)* → stop。何时查 / 查几次 / 何时停由模型在策略下自定。"""
-    return create_agent(build_model(), [make_rag_search(retriever)], system_prompt=AGENTIC_RAG_SYSTEM)
+def build_agent(retriever: Retriever, model: str | None = None):
+    """model →(rag_search → model)* → stop。何时查 / 查几次 / 何时停由模型在策略下自定。
+
+    `model` 显式指定答题模型（缺省读 `RAG_MODEL`）——做模型对比时只换这里，裁判端不动。"""
+    return create_agent(build_model(model), [make_rag_search(retriever)], system_prompt=AGENTIC_RAG_SYSTEM)

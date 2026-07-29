@@ -26,9 +26,11 @@ except ModuleNotFoundError:
 from langchain_openai import ChatOpenAI
 
 
-def build_model() -> ChatOpenAI:
+def build_model(model: str | None = None) -> ChatOpenAI:
     """OpenAI 兼容 chat 模型 —— 适配 OpenAI / x.ai(grok) / 智谱(glm) 及各类 OpenAI 兼容网关。
 
+    - `model`：显式指定模型名；缺省读 `RAG_MODEL`。**做模型对比实验时只换答题端、裁判端保持不变**，
+      否则分数变化分不清是"答得不同"还是"判得不同"（换裁判 = 换了尺子）。
     - 某些网关用 WAF 拦未知 User-Agent：用 RAG_USER_AGENT 伪装一个（如 "claude-code/2.1.214"）。
     - RAG_MAX_RETRIES / RAG_TIMEOUT 抵抗网关偶发的 5xx / 超时（如 Cloudflare 524：源站 120s 没返回）。
     """
@@ -37,7 +39,44 @@ def build_model() -> ChatOpenAI:
     if ua:
         headers["User-Agent"] = ua
     return ChatOpenAI(
-        model=os.environ.get("RAG_MODEL", "gpt-4o-mini"),
+        model=model or os.environ.get("RAG_MODEL", "gpt-4o-mini"),
+        base_url=os.environ.get("OPENAI_BASE_URL") or None,
+        api_key=os.environ.get("OPENAI_API_KEY", "sk-noop"),
+        temperature=0,
+        max_retries=int(os.environ.get("RAG_MAX_RETRIES", "5")),
+        timeout=float(os.environ.get("RAG_TIMEOUT", "120")),
+        default_headers=headers or None,
+    )
+
+
+class _FunctionCallingChat(ChatOpenAI):
+    """把结构化输出强制走 **function_calling**，而不是 langchain 默认的 `response_format: json_schema`。
+
+    为什么需要：openevals 的裁判内部调 `judge.with_structured_output(schema)`；ChatOpenAI 默认用
+    `json_schema` 响应格式，**本项目的网关不支持**——模型于是用**散文**给结论（"该回答正确。依据…"），
+    openevals 解析失败，**四个 LLM-judge 全军覆没、只剩确定性指标**（实测 deepseek 全系如此）。
+    而 function_calling 在同一网关上是好的（agent 的 rag_search 就靠它），改走这条路即可兑现结构化。
+    """
+
+    def with_structured_output(self, schema, **kwargs):  # type: ignore[override]
+        kwargs["method"] = "function_calling"
+        kwargs.pop("strict", None)                        # 网关不认 strict schema
+        return super().with_structured_output(schema, **kwargs)
+
+
+def build_judge(model: str | None = None) -> ChatOpenAI:
+    """**裁判**模型（LLM-as-judge 专用）：同 build_model，但结构化输出走 function_calling。
+
+    缺省读 `RAG_JUDGE_MODEL`，再退到 `RAG_MODEL`。**做模型对比时把裁判固定成同一个**，
+    否则新旧分数不可比；裁判模型下线导致旧实验无法复算时，用 `eval_rescore.py` 拿新裁判把
+    存档 run 统一重打一遍（见 EXPERIMENTS 实验13）。
+    """
+    headers: dict[str, str] = {}
+    ua = os.environ.get("RAG_USER_AGENT")
+    if ua:
+        headers["User-Agent"] = ua
+    return _FunctionCallingChat(
+        model=model or os.environ.get("RAG_JUDGE_MODEL") or os.environ.get("RAG_MODEL", "gpt-4o-mini"),
         base_url=os.environ.get("OPENAI_BASE_URL") or None,
         api_key=os.environ.get("OPENAI_API_KEY", "sk-noop"),
         temperature=0,

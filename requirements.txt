@@ -6,6 +6,7 @@ langgraph>=1.0                 # agentic RAG loop（agent.py / run_agentic.py）
 # 检索栈：词法 + 稠密向量 + 交叉编码重排（retriever_*.py）
 rank-bm25>=0.2                 # BM25 词法腿
 sentence-transformers>=3.0     # bge 向量 + bge-reranker 重排（本地，拉 torch）
+chromadb>=1.0                  # 稠密向量库：DenseRetriever 持久化 + 近邻查询
 numpy>=1.24                    # 分数归一化 / 加权融合
 
 # 评测：openevals LLM-as-judge + 推 LangSmith（eval_rag.py）

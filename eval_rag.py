@@ -7,6 +7,7 @@
   helpfulness          答案是否真正回应了问题
 
 每个指标是 [0,1] 连续分（continuous=True），judge 还给出打分理由（comment）。
+评测原语（SPECS / make_judges / call_judge / context_recall）统一放在 eval_common.py，多跳评测 eval_agentic.py 共用。
 
     python eval_rag.py --n 8                          # 本地评分 + 打印
     python eval_rag.py --n 8 --upload                 # 造个本地抽样 dataset + experiment 推 LangSmith
@@ -20,27 +21,12 @@ from __future__ import annotations
 
 import argparse
 
-from openevals.llm import create_llm_as_judge
-from openevals.prompts import (
-    CORRECTNESS_PROMPT,
-    RAG_GROUNDEDNESS_PROMPT,
-    RAG_HELPFULNESS_PROMPT,
-    RAG_RETRIEVAL_RELEVANCE_PROMPT,
-)
-
 from corpus_multihop import load_corpus, load_examples
+from eval_common import SPECS, call_judge, context_recall_fact, make_judges
 from eval_dataset import Example
 from llm import build_model
 from rag import answer
 from retriever_hybrid import HybridRetriever
-
-# 每个裁判需要的变量（决定调用时传哪些 kwargs）。
-_SPECS = {
-    "correctness": (CORRECTNESS_PROMPT, {"inputs", "outputs", "reference_outputs"}),
-    "groundedness": (RAG_GROUNDEDNESS_PROMPT, {"outputs", "context"}),
-    "retrieval_relevance": (RAG_RETRIEVAL_RELEVANCE_PROMPT, {"inputs", "context"}),
-    "helpfulness": (RAG_HELPFULNESS_PROMPT, {"inputs", "outputs"}),
-}
 
 
 def _sample(n: int) -> list[Example]:
@@ -48,28 +34,6 @@ def _sample(n: int) -> list[Example]:
     ans = [e for e in load_examples() if e.kind == "multihop"]
     step = max(1, len(ans) // n)
     return ans[::step][:n]
-
-
-def _judges(judge):
-    return {
-        name: create_llm_as_judge(prompt=prompt, feedback_key=name, judge=judge, continuous=True)
-        for name, (prompt, _needs) in _SPECS.items()
-    }
-
-
-def _call(name, fn, question, out, reference):
-    """按该裁判所需变量装 kwargs 后调用，返回 [0,1] 分。"""
-    needs = _SPECS[name][1]
-    kw = {}
-    if "inputs" in needs:
-        kw["inputs"] = question
-    if "outputs" in needs:
-        kw["outputs"] = out["answer"]
-    if "reference_outputs" in needs:
-        kw["reference_outputs"] = reference
-    if "context" in needs:
-        kw["context"] = "\n\n".join(out["contexts"])
-    return fn(**kw)
 
 
 def main() -> None:
@@ -84,7 +48,7 @@ def main() -> None:
     print("构建 hybrid 索引（BM25 + bge 向量 + reranker；首次会下模型/编码语料）...")
     retriever = HybridRetriever(load_corpus())
     model = build_model()
-    judges = _judges(model)
+    judges = make_judges(model)
 
     if args.dataset:
         _run_on_dataset(retriever, judges, model, args.dataset, args.n, args.topk)
@@ -95,13 +59,13 @@ def main() -> None:
         _upload(retriever, data, judges, model, args.topk)
         return
 
-    keys = list(_SPECS)
+    keys = list(SPECS)
     rows = []
     print(f"\n{'correct':>8} {'ground':>7} {'retr':>6} {'help':>6}  question")
     for ex in data:
         try:
             out = answer(ex.question, retriever, k=args.topk, model=model)
-            s = {k: _call(k, judges[k], ex.question, out, ex.reference)["score"] for k in keys}
+            s = {k: call_judge(k, judges[k], ex.question, out, ex.reference)["score"] for k in keys}
         except Exception as e:  # 网关 5xx/超时等：跳过该题，保住整轮
             print(f"   [skip] {type(e).__name__}: {str(e)[:60]}")
             continue
@@ -137,26 +101,19 @@ def _upload(retriever, data: list[Example], judges, model, topk: int) -> None:
 
     def _adapt(name, fn):
         def scorer(run, example):
-            r = _call(name, fn, example.inputs["question"], run.outputs,
-                      example.outputs.get("reference", ""))
+            r = call_judge(name, fn, example.inputs["question"], run.outputs,
+                           example.outputs.get("reference", ""))
             return {"key": name, "score": r["score"], "comment": r.get("comment")}
         return scorer
 
     evaluate(
         target,
         data=name,
-        evaluators=[_adapt(k, judges[k]) for k in _SPECS],
+        evaluators=[_adapt(k, judges[k]) for k in SPECS],
         experiment_prefix="hybrid-openevals",
         client=client,
     )
     print(f"\n[langsmith] 已推送 dataset + experiment '{name}'。")
-
-
-def _context_recall(run, example) -> dict:
-    """确定性 context recall：gold 文章标题里有多少被检索到（不花 LLM，用上传的 gold 证据）。"""
-    gold = set(example.outputs.get("gold_titles") or [])
-    got = set(run.outputs.get("sources") or [])
-    return {"key": "context_recall", "score": (len(gold & got) / len(gold)) if gold else None}
 
 
 def _run_on_dataset(retriever, judges, model, dataset: str, n: int, topk: int) -> None:
@@ -180,12 +137,12 @@ def _run_on_dataset(retriever, judges, model, dataset: str, n: int, topk: int) -
 
     def _adapt(name, fn):
         def scorer(run, example):
-            r = _call(name, fn, example.inputs["question"], run.outputs,
-                      example.outputs.get("reference", ""))
+            r = call_judge(name, fn, example.inputs["question"], run.outputs,
+                           example.outputs.get("reference", ""))
             return {"key": name, "score": r["score"], "comment": r.get("comment")}
         return scorer
 
-    evaluators = [_adapt(k, judges[k]) for k in _SPECS] + [_context_recall]
+    evaluators = [_adapt(k, judges[k]) for k in SPECS] + [context_recall_fact]
     results = evaluate(target, data=examples, evaluators=evaluators,
                        experiment_prefix=f"hybrid-on-{dataset}", max_concurrency=4, client=client)
     try:
@@ -195,7 +152,7 @@ def _run_on_dataset(retriever, judges, model, dataset: str, n: int, topk: int) -
                 if er.score is not None:
                     agg.setdefault(er.key, []).append(er.score)
         print(f"\n== 平均（{dataset}，{len(examples)} 题）==")
-        for k in list(_SPECS) + ["context_recall"]:
+        for k in list(SPECS) + ["context_recall_fact"]:
             v = agg.get(k, [])
             print(f"  {k:20s}: {sum(v) / len(v):.2f}" if v else f"  {k:20s}: n/a")
     except Exception as e:  # 聚合读取失败不影响实验已落库

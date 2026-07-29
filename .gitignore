@@ -6,3 +6,7 @@ __pycache__/
 .cache/
 *.egg-info/
 data/
+
+# 后台评测/诊断的运行日志（结论已归档进 EXPERIMENTS.md，日志本身不入库）
+*.out
+*.err
