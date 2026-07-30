@@ -26,10 +26,12 @@ gold 证据却是**具体事实陈述**，两者不共享词汇也不共享语�
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import pathlib
 import re
 import statistics as st
+import time
 from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
@@ -110,9 +112,11 @@ def main() -> None:
     ap.add_argument("--model", default=None, help="生成改写/子问句的模型（缺省读 .env 的 RAG_MODEL）")
     ap.add_argument("--reranker", default="bge", choices=["bge", "qwen"],
                     help="重排器；用 qwen 可测『查询分解 × 强 reranker』能否叠加")
-    ap.add_argument("--concurrency", type=int, default=6,
-                    help="改写/分解阶段的并发数。这阶段是**纯网关等待**，串行时占了大部分墙钟时间；"
-                         "重排在 GPU 上仍是串行的")
+    ap.add_argument("--concurrency", type=int, default=3,
+                    help="改写/分解阶段的并发数。这阶段是**纯网关等待**，串行做会把整轮时间乘以 5；"
+                         "但并发开太大会撞网关的并发上限（实测 6 会吃 429），默认 3。重排在 GPU 上仍是串行的")
+    ap.add_argument("--cache", default=".cache/query_rewrites.json",
+                    help="改写结果的落盘缓存（按 问句+子问句数 哈希）。网关很不稳，重跑时不该再向它要一遍")
     ap.add_argument("--dump", metavar="OUT.jsonl", default=None,
                     help="把**逐题逐策略**的分数落 JSONL —— 事后想算任意两策略的配对区间"
                          "（比如 4 vs 3 这个机制对照）就不必重跑一遍")
@@ -135,19 +139,57 @@ def main() -> None:
     llm = build_model(args.model)
 
     # 阶段一：**并发**生成改写/子问句。纯网关等待，串行做等于把整轮实验的时间乘以 5。
+    # ⚠️ 这里必须重试：一次 502 就丢一题，而丢题是**静默**的——实验12 的教训（失败必须可见、
+    #    不能悄悄降级）在这里换了个马甲又出现了一次。实测并发 6 会撞上网关的并发上限（429），
+    #    默认降到 3；改写结果按问句哈希落盘缓存，重跑时不必再向网关要一遍。
+    cache_p = pathlib.Path(args.cache)
+    cache: dict[str, list] = (json.loads(cache_p.read_text(encoding="utf-8"))
+                              if cache_p.exists() else {})
+
+    def _ask(prompt: str) -> str:
+        last = None
+        for wait in (0, 5, 20, 60):
+            if wait:
+                time.sleep(wait)
+            try:
+                return llm.invoke(prompt).content
+            except Exception as e:      # noqa: BLE001 —— 网关 5xx/429/超时
+                last = e
+        raise RuntimeError(f"网关连续 4 次失败：{type(last).__name__}: {str(last)[:80]}")
+
     def _rewrite(item):
         _, q, _ = item
+        key = hashlib.md5(f"{args.sub}|{q}".encode()).hexdigest()
+        if key in cache:
+            return cache[key]
         try:
-            return (_lines(llm.invoke(_MULTI.format(n=args.sub, q=q)).content, args.sub) or [q],
-                    _lines(llm.invoke(_DECOMP.format(n=args.sub, q=q)).content, args.sub) or [q])
-        except Exception as e:      # noqa: BLE001 —— 网关抽风；返回 None 让该题整体跳过
-            print(f"  ⚠️ 改写失败，跳过该题：{type(e).__name__}: {str(e)[:60]}", flush=True)
+            out = [_lines(_ask(_MULTI.format(n=args.sub, q=q)), args.sub) or [q],
+                   _lines(_ask(_DECOMP.format(n=args.sub, q=q)), args.sub) or [q]]
+        except Exception as e:      # noqa: BLE001 —— 重试尽了；该题整体跳过（会计入 attrition）
+            print(f"  ⚠️ 改写失败，跳过该题：{str(e)[:90]}", flush=True)
             return None
+        cache[key] = out
+        return out
 
-    print(f"阶段一：并发 {args.concurrency} 生成 {len(qs)} 题的改写/子问句…", flush=True)
+    print(f"阶段一：并发 {args.concurrency} 生成 {len(qs)} 题的改写/子问句"
+          f"（缓存命中 {sum(1 for t, q, _ in qs if hashlib.md5(f'{args.sub}|{q}'.encode()).hexdigest() in cache)} 题）…",
+          flush=True)
     with ThreadPoolExecutor(max_workers=args.concurrency) as pool:
         rewrites = list(pool.map(_rewrite, qs))
-    print(f"阶段二：检索 + 重排（GPU 串行）…", flush=True)
+    cache_p.write_text(json.dumps(cache, ensure_ascii=False), encoding="utf-8")
+
+    # 掉队率必须**按题型报出来**：如果某一类掉得特别多，各类之间就不再可比了。
+    lost: dict[str, list[int]] = {}
+    for (t, _, _), rw in zip(qs, rewrites):
+        s = lost.setdefault(t, [0, 0])
+        s[1] += 1
+        s[0] += rw is None
+    tot = sum(v[0] for v in lost.values())
+    if tot:
+        print("⚠️ 改写阶段掉队（网关重试耗尽）：" + "｜".join(
+            f"{t} {v[0]}/{v[1]}" for t, v in lost.items())
+            + "  ← 若各题型掉队率差别大，跨题型比较不可信，应重跑")
+    print("阶段二：检索 + 重排（GPU 串行）…", flush=True)
 
     agg: dict[str, dict[str, list]] = {}
     qtypes: list[str] = []          # 与 agg 里每条 list 的下标一一对应 → 支持分题型切片 + 配对
