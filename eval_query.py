@@ -16,8 +16,11 @@ gold 证据却是**具体事实陈述**，两者不共享词汇也不共享语�
 
 3 vs 4 是关键对照：如果 3 不涨而 4 涨，说明**光换召回不够，重排也必须跟着子问句走**。
 2 vs 3 回答"同义改写够不够，还是必须降到事实层"。
+**0（不重排）是实验14 用的那条"天花板"基线**，必须一起量——实验20 证明当年那条基线本身
+是 15 题的点估计、落在噪声里，所以本轮的判据改成 **相对 baseline 的配对 bootstrap 置信区间**：
+区间跨 0 就是"测不出差异"，不许再拿点估计下结论。
 
-    python eval_query.py --n 15 --types temporal
+    python eval_query.py --n 50 --types temporal,comparison,inference --model deepseek-v4-pro
 """
 
 from __future__ import annotations
@@ -26,15 +29,19 @@ import argparse
 import json
 import pathlib
 import re
+import statistics as st
+from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 
-from corpus_multihop import load_corpus
+from corpus_multihop import CHUNK_SIZE, load_corpus
 from llm import build_model
 from retriever_hybrid import HybridRetriever
 
 DATA = pathlib.Path(__file__).resolve().parent / "data"
-_KS = (4, 8, 16)
+# 交付深度按 chunk 对齐：chunk=600 时 k=16/32 才与旧配置(1200) 的 k=8/16 交付同样多字符。
+_KS = (8, 16, 32) if CHUNK_SIZE <= 700 else (4, 8, 16)
+_STRATEGIES = ("0 不重排", "1 baseline", "2 multiquery", "3 decompose", "4 decompose-each")
 
 _MULTI = ("Rewrite the following question in {n} different ways to maximize retrieval coverage. "
           "Keep the same meaning; vary wording and phrasing. "
@@ -73,6 +80,9 @@ def _rerank(retr, query: str, docs: list) -> list:
 
 
 def _score(docs: list, facts: list[str], ks=_KS) -> dict:
+    """fact 级召回。这里沿用「证据句前 120 字符」口径——实验19 ① 指出它**看不见证据被切断**，
+    因而不适合跨 chunk 大小比较；但本脚本所有策略**共用同一份切分**，这个偏差对各策略等量作用，
+    故对策略间比较是中立的。"""
     out = {}
     for k in ks:
         blob = _norm(" ".join(d.text for d in docs[:k]))
@@ -82,13 +92,30 @@ def _score(docs: list, facts: list[str], ks=_KS) -> dict:
     return out
 
 
+def _paired_ci(base: list[float], alt: list[float], boots: int = 20000) -> tuple[float, float, float]:
+    """alt − base 的**配对**均值及 95% bootstrap 置信区间（同一批题，消掉题目难易这个方差源）。"""
+    d = np.asarray(alt, dtype=float) - np.asarray(base, dtype=float)
+    if not len(d):
+        return (float("nan"),) * 3
+    rng = np.random.default_rng(0)
+    m = d[rng.integers(0, len(d), size=(boots, len(d)))].mean(axis=1)
+    return float(d.mean()), float(np.percentile(m, 2.5)), float(np.percentile(m, 97.5))
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--n", type=int, default=15, help="每种题型抽几题")
+    ap.add_argument("--n", type=int, default=50, help="每种题型抽几题（实验20 的教训：15 题分不出 0.1 的效应）")
     ap.add_argument("--types", default="temporal", help="题型，逗号分隔（comparison/inference/temporal）")
     ap.add_argument("--sub", type=int, default=3, help="生成几个改写/子问句")
+    ap.add_argument("--model", default=None, help="生成改写/子问句的模型（缺省读 .env 的 RAG_MODEL）")
     ap.add_argument("--reranker", default="bge", choices=["bge", "qwen"],
-                    help="重排器；用 qwen 可测『查询分解 × 强 reranker』能否叠加（实验15：两者修的是同一环的不同侧面）")
+                    help="重排器；用 qwen 可测『查询分解 × 强 reranker』能否叠加")
+    ap.add_argument("--concurrency", type=int, default=6,
+                    help="改写/分解阶段的并发数。这阶段是**纯网关等待**，串行时占了大部分墙钟时间；"
+                         "重排在 GPU 上仍是串行的")
+    ap.add_argument("--dump", metavar="OUT.jsonl", default=None,
+                    help="把**逐题逐策略**的分数落 JSONL —— 事后想算任意两策略的配对区间"
+                         "（比如 4 vs 3 这个机制对照）就不必重跑一遍")
     args = ap.parse_args()
 
     types = [t.strip() for t in args.types.split(",") if t.strip()]
@@ -105,19 +132,36 @@ def main() -> None:
         retr = HybridRetriever(load_corpus(), reranker=QwenReranker())
     else:
         retr = HybridRetriever(load_corpus())
-    llm = build_model()
-    agg: dict[str, dict[str, list]] = {}
+    llm = build_model(args.model)
 
-    for i, (t, q, facts) in enumerate(qs, 1):
+    # 阶段一：**并发**生成改写/子问句。纯网关等待，串行做等于把整轮实验的时间乘以 5。
+    def _rewrite(item):
+        _, q, _ = item
         try:
-            multi = _lines(llm.invoke(_MULTI.format(n=args.sub, q=q)).content, args.sub) or [q]
-            decomp = _lines(llm.invoke(_DECOMP.format(n=args.sub, q=q)).content, args.sub) or [q]
-        except Exception as e:
-            print(f"  ⚠️ 第{i}题改写失败，跳过：{type(e).__name__}: {str(e)[:60]}")
-            continue
+            return (_lines(llm.invoke(_MULTI.format(n=args.sub, q=q)).content, args.sub) or [q],
+                    _lines(llm.invoke(_DECOMP.format(n=args.sub, q=q)).content, args.sub) or [q])
+        except Exception as e:      # noqa: BLE001 —— 网关抽风；返回 None 让该题整体跳过
+            print(f"  ⚠️ 改写失败，跳过该题：{type(e).__name__}: {str(e)[:60]}", flush=True)
+            return None
 
+    print(f"阶段一：并发 {args.concurrency} 生成 {len(qs)} 题的改写/子问句…", flush=True)
+    with ThreadPoolExecutor(max_workers=args.concurrency) as pool:
+        rewrites = list(pool.map(_rewrite, qs))
+    print(f"阶段二：检索 + 重排（GPU 串行）…", flush=True)
+
+    agg: dict[str, dict[str, list]] = {}
+    qtypes: list[str] = []          # 与 agg 里每条 list 的下标一一对应 → 支持分题型切片 + 配对
+    dump: list[dict] = []
+
+    for i, ((t, q, facts), rw) in enumerate(zip(qs, rewrites), 1):
+        if rw is None:              # 改写失败 → 整题跳过，各策略下标仍对齐
+            continue
+        multi, decomp = rw
+
+        fused = retr._fuse(q)
         strategies = {
-            "1 baseline": _rerank(retr, q, retr._fuse(q)),
+            "0 不重排": fused,                                # 实验14 拿来当"天花板"的那条基线
+            "1 baseline": _rerank(retr, q, fused),
             "2 multiquery": _rerank(retr, q, _rrf([retr._fuse(s) for s in multi])),
             "3 decompose": _rerank(retr, q, _rrf([retr._fuse(s) for s in decomp])),
         }
@@ -131,22 +175,48 @@ def main() -> None:
                     inter.append(p[rank])
         strategies["4 decompose-each"] = inter
 
+        row = {"type": t, "question": q}
         for name, docs in strategies.items():
             slot = agg.setdefault(name, {})
             for k, v in _score(docs, facts).items():
                 slot.setdefault(k, []).append(v)
+                row[f"{name}|{k}"] = v
+        qtypes.append(t)
+        dump.append(row)
         if i == 1:
             print(f"[样例] 原问句：{q[:100]}\n  改写→ {multi[0][:90]}\n  分解→ {decomp[0][:90]}\n")
-        print(f"  {i}/{len(qs)} done", flush=True)
+        if i % 10 == 0:
+            print(f"  {i}/{len(qs)}", flush=True)
+
+    if args.dump:
+        pathlib.Path(args.dump).write_text(
+            "\n".join(json.dumps(r, ensure_ascii=False) for r in dump), encoding="utf-8")
+        print(f"逐题分数已写入 {args.dump}（{len(dump)} 行）")
 
     cols = [f"@{k}" for k in _KS] + ["pool"]
-    n = len(next(iter(agg.values()))["@8"]) if agg else 0
-    print(f"\n== fact 级召回 · 按**查询策略** · {'+'.join(types)} · n={n} · 子问句 {args.sub} 个 · reranker={args.reranker} ==")
-    print(f"{'策略':18s} " + " ".join(f"{c:>8}" for c in cols))
-    for name in ("1 baseline", "2 multiquery", "3 decompose", "4 decompose-each"):
-        d = agg.get(name)
-        if d:
-            print(f"{name:18s} " + " ".join(f"{sum(d[c]) / len(d[c]):>8.3f}" for c in cols))
+    kk = f"@{_KS[1]}"
+    print(f"\n== fact 级召回 · 按**查询策略** · n={len(qtypes)} · 子问句 {args.sub} 个"
+          f" · chunk={CHUNK_SIZE} · reranker={args.reranker} ==")
+    for t in ([*types, "全部"] if len(types) > 1 else types):
+        idx = [j for j, x in enumerate(qtypes) if t == "全部" or x == t]
+        if not idx:
+            continue
+        print(f"\n--- {t}（n={len(idx)}）---")
+        print(f"{'策略':18s}" + "".join(f"{c:>9}" for c in cols)
+              + f"{'Δ' + kk + ' vs baseline [95%CI]':>36}")
+        base = [agg["1 baseline"][kk][j] for j in idx]
+        for name in _STRATEGIES:
+            d = agg.get(name)
+            if not d:
+                continue
+            cells = "".join(f"{st.mean(d[c][j] for j in idx):>9.3f}" for c in cols)
+            if name == "1 baseline":
+                print(f"{name:18s}{cells}{'（基准）':>32}")
+                continue
+            m, lo, hi = _paired_ci(base, [d[kk][j] for j in idx])
+            sig = "✅" if lo > 0 else ("⛔" if hi < 0 else "  ")
+            print(f"{name:18s}{cells}{m:>+18.3f} [{lo:+.3f},{hi:+.3f}]{sig}")
+        print("  ✅/⛔ = 配对区间不跨 0；空白 = **测不出差异**，不许拿点估计下结论（实验20 的教训）")
 
 
 if __name__ == "__main__":
