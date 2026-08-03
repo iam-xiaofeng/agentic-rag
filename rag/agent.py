@@ -1,6 +1,8 @@
 """agentic RAG loop —— langchain.agents.create_agent，复用 llm.py 的 build_model。
 
-模型自己决定 **该不该查 / 查几次 / 何时停**，由 AGENTIC_RAG_SYSTEM 的四条策略约束，而非写死控制流。
+模型自己决定 **该不该查 / 查几次 / 何时停**，由 AGENTIC_RAG_SYSTEM 的五条策略约束，而非写死控制流。
+（第 5 条 REPORT EVIDENCE 让它把「最关键的那几句」原样吐在末尾 —— 评测端据此判「依据够不够」，
+见 eval_judge.py；`run_agentic.py` 交互时这块会直接显示给用户，本来也是该有的引用。）
 这是和 run.py（单次强检索流水线）**正交**的另一条路；检索后端仍是同一套 Retriever 协议。
 
 （pivot 时本文件曾移入 tag v1-agentic-comparison，现按需恢复并存；build_model 统一走 llm.py，不再各搞一份。
@@ -11,10 +13,10 @@ from __future__ import annotations
 
 from langchain.agents import create_agent
 
-from llm import build_model
-from prompts import AGENTIC_RAG_SYSTEM
-from retriever import Retriever
-from tools import make_rag_search
+from rag.llm import build_model
+from rag.prompts import AGENTIC_RAG_SYSTEM
+from rag.retriever import Retriever
+from rag.tools import make_rag_search
 
 
 def build_agent(retriever: Retriever, model: str | None = None):
