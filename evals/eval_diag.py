@@ -14,6 +14,11 @@
 
 from __future__ import annotations
 
+# 让 `python evals/xxx.py` 直接可跑：把仓库根放进 sys.path（否则 rag.* 导不到）。
+import pathlib as _pl, sys as _sys
+if str(_pl.Path(__file__).resolve().parents[1]) not in _sys.path:
+    _sys.path.insert(0, str(_pl.Path(__file__).resolve().parents[1]))
+
 import argparse
 import json
 import pathlib
@@ -21,10 +26,10 @@ import re
 
 import numpy as np
 
-from corpus_multihop import load_corpus
-from retriever_hybrid import HybridRetriever
+from rag.corpus_multihop import load_corpus
+from rag.retriever_hybrid import HybridRetriever
 
-DATA = pathlib.Path(__file__).resolve().parent / "data"
+DATA = pathlib.Path(__file__).resolve().parents[1] / "data"
 
 
 def _norm(s: str) -> str:
@@ -83,7 +88,7 @@ def main() -> None:
         qs = qs[: args.n]
 
     if args.reranker == "qwen":
-        from reranker_qwen import QwenReranker
+        from rag.reranker_qwen import QwenReranker
         retr = HybridRetriever(load_corpus(), reranker=QwenReranker(), pool=args.pool)
     else:
         retr = HybridRetriever(load_corpus(), pool=args.pool)

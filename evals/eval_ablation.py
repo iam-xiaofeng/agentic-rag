@@ -12,14 +12,19 @@
 
 from __future__ import annotations
 
+# 让 `python evals/xxx.py` 直接可跑：把仓库根放进 sys.path（否则 rag.* 导不到）。
+import pathlib as _pl, sys as _sys
+if str(_pl.Path(__file__).resolve().parents[1]) not in _sys.path:
+    _sys.path.insert(0, str(_pl.Path(__file__).resolve().parents[1]))
+
 import argparse
 import json
 
 import numpy as np
 
-from corpus_multihop import DATA, load_corpus
-from eval_common import _norm
-from retriever_hybrid import HybridRetriever
+from rag.corpus_multihop import DATA, load_corpus
+from evals.eval_common import _norm
+from rag.retriever_hybrid import HybridRetriever
 
 KS = (4, 8)  # 报告的 top-k（交给模型的深度）
 

@@ -19,7 +19,8 @@ try:
 
     for _k in [_k for _k, _v in os.environ.items() if _v == ""]:
         del os.environ[_k]
-    load_dotenv(Path(__file__).resolve().parent / ".env")
+    # parents[1] = 仓库根：本文件在 rag/ 下，.env 在根上（2026-08 目录重组后）
+    load_dotenv(Path(__file__).resolve().parents[1] / ".env")
 except ModuleNotFoundError:
     pass
 

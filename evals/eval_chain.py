@@ -18,6 +18,11 @@ L1 与 L3 的落差，就是"问句写得不对"要背的锅；L0/L1 若塌，�
 
 from __future__ import annotations
 
+# 让 `python evals/xxx.py` 直接可跑：把仓库根放进 sys.path（否则 rag.* 导不到）。
+import pathlib as _pl, sys as _sys
+if str(_pl.Path(__file__).resolve().parents[1]) not in _sys.path:
+    _sys.path.insert(0, str(_pl.Path(__file__).resolve().parents[1]))
+
 import argparse
 import json
 import pathlib
@@ -26,11 +31,11 @@ import statistics as st
 
 import numpy as np
 
-from corpus_multihop import load_corpus
-from retriever_bm25 import BM25Retriever
-from retriever_dense import DenseRetriever
+from rag.corpus_multihop import load_corpus
+from rag.retriever_bm25 import BM25Retriever
+from rag.retriever_dense import DenseRetriever
 
-DATA = pathlib.Path(__file__).resolve().parent / "data"
+DATA = pathlib.Path(__file__).resolve().parents[1] / "data"
 _PROBE = 200          # 排名探测深度；超出记为 >200（用 _MISS 表示）
 _MISS = 10**6
 
@@ -65,9 +70,9 @@ _CHUNK_KS = [(1200, 8), (1200, 16), (600, 16), (600, 32)]
 
 
 def _chunk_sweep(types: list[str], n: int) -> None:
-    import corpus_multihop as cm
+    import rag.corpus_multihop as cm
     from langchain_text_splitters import RecursiveCharacterTextSplitter
-    from retriever_hybrid import HybridRetriever
+    from rag.retriever_hybrid import HybridRetriever
 
     rows = json.loads((DATA / "MultiHopRAG.json").read_text(encoding="utf-8"))
     qs = []

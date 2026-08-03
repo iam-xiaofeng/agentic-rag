@@ -13,7 +13,7 @@ import os
 
 from langchain_core.tools import StructuredTool
 
-from retriever import Retriever
+from rag.retriever import Retriever
 
 # k=32 而不是 16：chunk 从 1200 缩到 600 后（实验19-20），同样的 k 只交付一半字符。
 # 32×516 ≈ 16.5k 字符 ≈ 旧配置 16×1042，**上下文预算不变**，而重排后 fact 级召回三类均值

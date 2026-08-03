@@ -12,8 +12,8 @@ from __future__ import annotations
 import argparse
 import sys
 
-from corpus_multihop import load_corpus
-from retriever_hybrid import HybridRetriever
+from rag.corpus_multihop import load_corpus
+from rag.retriever_hybrid import HybridRetriever
 
 
 def main() -> None:
@@ -35,7 +35,7 @@ def main() -> None:
     if args.no_gen:
         return
 
-    from rag import answer
+    from rag.pipeline import answer
 
     print("\n=== grounded 生成（需模型 key）===", file=sys.stderr)
     out = answer(question, retriever, k=args.topk, hits=hits)

@@ -15,15 +15,20 @@
 
 from __future__ import annotations
 
+# 让 `python evals/xxx.py` 直接可跑：把仓库根放进 sys.path（否则 rag.* 导不到）。
+import pathlib as _pl, sys as _sys
+if str(_pl.Path(__file__).resolve().parents[1]) not in _sys.path:
+    _sys.path.insert(0, str(_pl.Path(__file__).resolve().parents[1]))
+
 import argparse
 import json
 import pathlib
 
-import llm  # noqa: F401  —— 触发 .env 加载（LANGSMITH_API_KEY）
+import rag.llm as llm  # noqa: F401  —— 触发 .env 加载（LANGSMITH_API_KEY）
 
 from langsmith import Client
 
-DATA = pathlib.Path(__file__).resolve().parent / "data"
+DATA = pathlib.Path(__file__).resolve().parents[1] / "data"
 
 
 def _rows() -> list[dict]:

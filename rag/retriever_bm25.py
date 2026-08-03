@@ -17,7 +17,7 @@ import re
 
 from rank_bm25 import BM25Okapi
 
-from retriever import Doc, Hit
+from rag.retriever import Doc, Hit
 
 _WORD = re.compile(r"[a-z0-9]+")
 

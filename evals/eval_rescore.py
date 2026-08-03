@@ -14,6 +14,11 @@ run 的输出（answer / contexts）都存在 LangSmith 里，重打分不需要
 
 from __future__ import annotations
 
+# 让 `python evals/xxx.py` 直接可跑：把仓库根放进 sys.path（否则 rag.* 导不到）。
+import pathlib as _pl, sys as _sys
+if str(_pl.Path(__file__).resolve().parents[1]) not in _sys.path:
+    _sys.path.insert(0, str(_pl.Path(__file__).resolve().parents[1]))
+
 import argparse
 import json
 import pathlib
@@ -22,10 +27,10 @@ from concurrent.futures import ThreadPoolExecutor
 
 from langsmith import Client
 
-from eval_common import SPECS, call_judge, make_judges
-from llm import build_judge
+from evals.eval_common import SPECS, call_judge, make_judges
+from rag.llm import build_judge
 
-DATA = pathlib.Path(__file__).resolve().parent / "data"
+DATA = pathlib.Path(__file__).resolve().parents[1] / "data"
 _AXES = ["correctness", "groundedness", "retrieval_relevance", "helpfulness"]
 
 

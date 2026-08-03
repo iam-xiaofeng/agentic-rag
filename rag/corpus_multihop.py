@@ -22,10 +22,10 @@ import pathlib
 
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
-from eval_dataset import Example
-from retriever import Doc
+from rag.dataset import Example
+from rag.retriever import Doc
 
-DATA = pathlib.Path(__file__).resolve().parent / "data"
+DATA = pathlib.Path(__file__).resolve().parents[1] / "data"   # parents[1] = 仓库根（本文件在 rag/ 下）
 
 # 递归切分：优先按段落(\n\n)→行(\n)→句(". ")→词切，凑到 CHUNK_SIZE 字符、重叠 CHUNK_OVERLAP。
 # 比旧版定长滑窗尊重语义边界（不把证据句拦腰切断），也不再先把 \n\n 压平。

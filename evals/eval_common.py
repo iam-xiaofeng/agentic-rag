@@ -12,6 +12,11 @@ eval_rag.py（单次流水线）和 eval_agentic.py（多跳）都从这里取�
 
 from __future__ import annotations
 
+# 让 `python evals/xxx.py` 直接可跑：把仓库根放进 sys.path（否则 rag.* 导不到）。
+import pathlib as _pl, sys as _sys
+if str(_pl.Path(__file__).resolve().parents[1]) not in _sys.path:
+    _sys.path.insert(0, str(_pl.Path(__file__).resolve().parents[1]))
+
 import re
 
 from openevals.llm import create_llm_as_judge

@@ -31,6 +31,11 @@
 
 from __future__ import annotations
 
+# 让 `python evals/xxx.py` 直接可跑：把仓库根放进 sys.path（否则 rag.* 导不到）。
+import pathlib as _pl, sys as _sys
+if str(_pl.Path(__file__).resolve().parents[1]) not in _sys.path:
+    _sys.path.insert(0, str(_pl.Path(__file__).resolve().parents[1]))
+
 import argparse
 import hashlib
 import json
@@ -41,14 +46,14 @@ import time
 
 import numpy as np
 
-import corpus_multihop as cm
-from retriever import Doc, Hit
-from retriever_bm25 import BM25Retriever
-from retriever_dense import _MODEL, _QUERY_PROMPT
-from retriever_hybrid import HybridRetriever
+import rag.corpus_multihop as cm
+from rag.retriever import Doc, Hit
+from rag.retriever_bm25 import BM25Retriever
+from rag.retriever_dense import _MODEL, _QUERY_PROMPT
+from rag.retriever_hybrid import HybridRetriever
 
-DATA = pathlib.Path(__file__).resolve().parent / "data"
-_CACHE = pathlib.Path(__file__).resolve().parent / ".cache"
+DATA = pathlib.Path(__file__).resolve().parents[1] / "data"
+_CACHE = pathlib.Path(__file__).resolve().parents[1] / ".cache"
 _PROBE = 200            # 排名探测深度；超出（含证据句根本没留下来）一律记 _MISS
 _MISS = 10**6
 _KEY = 120             # 与下游 fact@k 口径一致：证据句前 120 字符作为匹配键
@@ -240,7 +245,7 @@ def _layer0(cfgs: list[tuple[int, int]], types: list[str], n: int, k: int = 100)
     HNSW 的近似误差会不会跟着涨？这里直接量：同一批 query，两者 top-k 的集合重合度与首位一致率。
     （顺带把选定配置的 Chroma 集合建出来——生产要用。）
     """
-    from retriever_dense import DenseRetriever
+    from rag.retriever_dense import DenseRetriever
 
     qs = _load_questions(types, n)
     print(f"{'chunk':>6}{'ovl':>5}{'片段数':>8}{'query数':>8}{'top1一致':>10}{'top' + str(k) + '重合':>10}{'名次相同':>10}")
@@ -291,13 +296,13 @@ def _layer3(cfgs: list[tuple[int, int]], pool: int, types: list[str], n: int,
     for size, ovl in cfgs:
         docs = cm.load_corpus(chunk_size=size, chunk_overlap=ovl)
         if chroma:                                   # 用生产真身，排除"探针 ≠ Chroma"这个变量
-            from retriever_dense import DenseRetriever
+            from rag.retriever_dense import DenseRetriever
             probe = DenseRetriever(docs)
         else:
             probe = _DenseProbe(docs)
         bm25 = BM25Retriever(docs)
         if reranker == "qwen":
-            from reranker_qwen import QwenReranker
+            from rag.reranker_qwen import QwenReranker
             retr = HybridRetriever(docs, pool=pool, reranker=QwenReranker(), bm25=bm25, dense=probe)
         else:
             retr = HybridRetriever(docs, pool=pool, bm25=bm25, dense=probe)

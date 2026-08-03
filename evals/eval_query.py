@@ -25,6 +25,11 @@ gold 证据却是**具体事实陈述**，两者不共享词汇也不共享语�
 
 from __future__ import annotations
 
+# 让 `python evals/xxx.py` 直接可跑：把仓库根放进 sys.path（否则 rag.* 导不到）。
+import pathlib as _pl, sys as _sys
+if str(_pl.Path(__file__).resolve().parents[1]) not in _sys.path:
+    _sys.path.insert(0, str(_pl.Path(__file__).resolve().parents[1]))
+
 import argparse
 import hashlib
 import json
@@ -36,11 +41,11 @@ from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 
-from corpus_multihop import CHUNK_SIZE, load_corpus
-from llm import build_model
-from retriever_hybrid import HybridRetriever
+from rag.corpus_multihop import CHUNK_SIZE, load_corpus
+from rag.llm import build_model
+from rag.retriever_hybrid import HybridRetriever
 
-DATA = pathlib.Path(__file__).resolve().parent / "data"
+DATA = pathlib.Path(__file__).resolve().parents[1] / "data"
 # 交付深度按 chunk 对齐：chunk=600 时 k=16/32 才与旧配置(1200) 的 k=8/16 交付同样多字符。
 _KS = (8, 16, 32) if CHUNK_SIZE <= 700 else (4, 8, 16)
 _STRATEGIES = ("0 不重排", "1 baseline", "2 multiquery", "3 decompose", "4 decompose-each")
@@ -132,7 +137,7 @@ def main() -> None:
             qs.append((t, r["query"], [e["fact"] for e in r["evidence_list"] if e.get("fact")]))
 
     if args.reranker == "qwen":
-        from reranker_qwen import QwenReranker
+        from rag.reranker_qwen import QwenReranker
         retr = HybridRetriever(load_corpus(), reranker=QwenReranker())
     else:
         retr = HybridRetriever(load_corpus())

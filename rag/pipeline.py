@@ -6,8 +6,8 @@
 
 from __future__ import annotations
 
-from llm import build_model
-from retriever import Hit, Retriever
+from rag.llm import build_model
+from rag.retriever import Hit, Retriever
 
 # 喂给模型的功能性系统提示（英文——只用检索到的上下文、标 [source:]、查不到就认怂）。
 _SYSTEM = (

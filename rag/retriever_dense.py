@@ -20,12 +20,12 @@ import pathlib
 
 import numpy as np
 
-from retriever import Doc, Hit
+from rag.retriever import Doc, Hit
 
 _MODEL = "BAAI/bge-large-en-v1.5"
 # bge-en-v1.5 检索时给 query 的指令前缀（passage 不加）。
 _QUERY_PROMPT = "Represent this sentence for searching relevant passages: "
-_CACHE = pathlib.Path(__file__).resolve().parent / ".cache"
+_CACHE = pathlib.Path(__file__).resolve().parents[1] / ".cache"
 _CHROMA_DIR = _CACHE / "chroma"
 _ADD_BATCH = 2000  # 保守值，Chroma 单次写入上限约 5461
 

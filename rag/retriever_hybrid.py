@@ -18,9 +18,9 @@ import os
 
 import numpy as np
 
-from retriever import Doc, Hit
-from retriever_bm25 import BM25Retriever
-from retriever_dense import DenseRetriever
+from rag.retriever import Doc, Hit
+from rag.retriever_bm25 import BM25Retriever
+from rag.retriever_dense import DenseRetriever
 
 _RERANKER = "BAAI/bge-reranker-v2-m3"
 # 池的**信息量**要与 chunk 匹配：pool×chunk ≈ 恒定（实验19 ⑥）。chunk=600 下 100→200 有收益、

@@ -7,10 +7,13 @@ __pycache__/
 *.egg-info/
 data/
 
-# 后台评测/诊断的运行日志（结论已归档进 EXPERIMENTS.md，日志本身不入库）
+# 后台评测/诊断的运行日志 + 逐题结果 dump，统一归档到 runs/（结论已进 EXPERIMENTS.md，过程不入库）
+runs/
 *.out
 *.err
-# eval_agentic.py --local 的逐题结果（用于配对分析，数据量大且可重跑）
+# eval_agentic.py --local / eval_judge.py 的逐题结果（用于配对分析，数据量大且可重跑）
 ab_*.jsonl
+ks_*.jsonl
+judged_*.jsonl
 # 例外：eval_query.py --dump 的 q23.jsonl **入库**——它是实验23 那几个置信区间的逐题原始数据，
 # 留着让结论可独立复核（192KB）。凡是撑起统计主张的原始数据都该入库，日志则不必。

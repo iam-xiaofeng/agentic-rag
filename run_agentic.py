@@ -12,11 +12,11 @@ from __future__ import annotations
 import argparse
 import sys
 
-from agent import build_agent
-from corpus_multihop import load_corpus
-from retriever_bm25 import BM25Retriever
-from retriever_dense import DenseRetriever
-from retriever_hybrid import HybridRetriever
+from rag.agent import build_agent
+from rag.corpus_multihop import load_corpus
+from rag.retriever_bm25 import BM25Retriever
+from rag.retriever_dense import DenseRetriever
+from rag.retriever_hybrid import HybridRetriever
 
 _RETRIEVERS = {"bm25": BM25Retriever, "dense": DenseRetriever, "hybrid": HybridRetriever}
 
