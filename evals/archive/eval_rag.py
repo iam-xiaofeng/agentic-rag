@@ -21,13 +21,13 @@ from __future__ import annotations
 
 # 让 `python evals/xxx.py` 直接可跑：把仓库根放进 sys.path（否则 rag.* 导不到）。
 import pathlib as _pl, sys as _sys
-if str(_pl.Path(__file__).resolve().parents[1]) not in _sys.path:
-    _sys.path.insert(0, str(_pl.Path(__file__).resolve().parents[1]))
+if str(_pl.Path(__file__).resolve().parents[2]) not in _sys.path:
+    _sys.path.insert(0, str(_pl.Path(__file__).resolve().parents[2]))
 
 import argparse
 
 from rag.corpus_multihop import load_corpus, load_examples
-from evals.eval_common import SPECS, call_judge, context_recall_fact, make_judges
+from evals.archive.eval_common import SPECS, call_judge, context_recall_fact, make_judges
 from rag.dataset import Example
 from rag.llm import build_model
 from rag.pipeline import answer
