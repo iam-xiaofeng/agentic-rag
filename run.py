@@ -1,10 +1,11 @@
-"""CLI：在真实语料（MultiHop-RAG）上跑 hybrid 检索（BM25 + bge 向量 + reranker），可选生成答案。
+"""CLI：在真实语料上跑 hybrid 检索（BM25 + bge 向量 + reranker），可选生成答案。
 
     python run.py "Who is Sam Bankman-Fried?"     # 检索 + grounded 生成
     python run.py --topk 8 "..."                  # 看更多候选
     python run.py --no-gen "..."                  # 只看检索排序，不调模型
 
-首次运行会下 bge 模型并对 ~6711 个片段编码（之后走 .cache 缓存，秒级）。
+默认语料 = MuSiQue（21100 段）；`--corpus multihoprag` 换回旧语料（⚠️ 已被实验25 证伪）。
+首次运行会下 bge 模型并对全部片段编码（之后走 .cache 缓存，秒级）。
 """
 
 from __future__ import annotations
@@ -12,7 +13,6 @@ from __future__ import annotations
 import argparse
 import sys
 
-from rag.corpus_multihop import load_corpus
 from rag.retriever_hybrid import HybridRetriever
 
 
@@ -21,9 +21,14 @@ def main() -> None:
     ap.add_argument("question", nargs="+", help="要问的问题")
     ap.add_argument("--topk", type=int, default=4, help="返回片段数（默认 4）")
     ap.add_argument("--no-gen", action="store_true", help="只检索、不调模型生成")
+    ap.add_argument("--corpus", choices=["musique", "multihoprag"], default="musique")
     args = ap.parse_args()
     question = " ".join(args.question).strip()
 
+    if args.corpus == "musique":
+        from rag.corpus_musique import load_corpus
+    else:
+        from rag.corpus_multihop import load_corpus
     print("构建 hybrid 索引（BM25 + bge 向量 + reranker；首次会下模型 / 编码语料）...", file=sys.stderr)
     retriever = HybridRetriever(load_corpus())
     hits = retriever.search(question, k=args.topk)
