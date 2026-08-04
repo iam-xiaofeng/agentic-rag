@@ -41,7 +41,7 @@ class HybridRetriever:
         docs: list[Doc],
         w_bm25: float = 0.5,
         w_dense: float = 0.5,
-        pool: int = _POOL,
+        pool: int | None = None,
         reranker=_RERANKER,  # 模型名(→CrossEncoder) 或已构建的重排器对象(有 .predict，如 QwenReranker)
                              # 或 None = 不加载重排器（只用 _fuse，给融合层的对照实验省显存）
         fusion: str = "rrf",
@@ -55,7 +55,9 @@ class HybridRetriever:
         self.docs = docs
         self.bm25 = bm25 if bm25 is not None else BM25Retriever(docs)
         self.dense = dense if dense is not None else DenseRetriever(docs)
-        self.w_bm25, self.w_dense, self.pool = w_bm25, w_dense, pool
+        # pool 同理：构造时才读 env，好让 run_matrix.py 的 pool= 臂参数在同进程里生效。
+        self.w_bm25, self.w_dense = w_bm25, w_dense
+        self.pool = pool if pool is not None else int(os.environ.get("RAG_POOL", _POOL))
         self.fusion, self._rrf_k = fusion, rrf_k
         self.max_per_source = max_per_source
         if reranker is None:                      # 不重排（只测召回/融合）
