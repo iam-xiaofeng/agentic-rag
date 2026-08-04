@@ -1,0 +1,170 @@
+{
+  "_readme": "演示用题集：live demo 时拿它跑 run_agentic.py。**这不是指标样本**——它是从 90 题里挑出 gpt-5.6-luna 答对、有依据、gold 证据全交付、且不在坏题名单里的题。任何数字请看 README 第六节，别用这 9 题算准确率。",
+  "_selected_from": "runs/dumps/m1_strong_judged.jsonl (gpt-5.6-luna / react / k=8, n=88)",
+  "_filter": "correct ∧ grounded ∧ delivered≥0.99 ∧ n_search≥2 ∧ 无 ungrounded_claims ∧ 未截断 ∧ ∉ blocklist(any_bad ∪ multi_answer)",
+  "_pool_size": 29,
+  "questions": [
+    {
+      "example_id": "2hop__82910_75184",
+      "type": "2hop",
+      "question": "Who played the girlfriend of Alex P. Keaton's actor on Family Ties in Back to the Future?",
+      "gold_answer": "Claudia Wells",
+      "hops_zh": "Alex P. Keaton → Michael J. Fox → 他在《回到未来》演 Marty McFly → Marty 的女友 Jennifer 由谁演",
+      "gold_titles": [
+        "Alex P. Keaton",
+        "List of Back to the Future characters"
+      ],
+      "observed": {
+        "n_search": 2,
+        "delivered": 1.0,
+        "correct": 1.0,
+        "grounded": 1.0
+      }
+    },
+    {
+      "example_id": "2hop__7046_44085",
+      "type": "2hop",
+      "question": "What was the old show that was named after a character that Walt Disney created in 1928 called?",
+      "gold_answer": "The Mickey Mouse Club",
+      "hops_zh": "迪士尼 1928 年创造的角色 → 米老鼠 → 以它命名的老节目",
+      "gold_titles": [
+        "The Mickey Mouse Club",
+        "Universal Pictures"
+      ],
+      "observed": {
+        "n_search": 2,
+        "delivered": 1.0,
+        "correct": 1.0,
+        "grounded": 1.0
+      }
+    },
+    {
+      "example_id": "2hop__59366_71206",
+      "type": "2hop",
+      "question": "On The Drew Carey Show, who plays the character with the same name as the character who died in 47 Meters Down?",
+      "gold_answer": "Christa Miller",
+      "hops_zh": "《47 米深渊》里死掉的角色叫 Kate → 《德鲁·凯里秀》里同名角色 Kate 谁演",
+      "gold_titles": [
+        "47 Meters Down",
+        "The Drew Carey Show"
+      ],
+      "observed": {
+        "n_search": 2,
+        "delivered": 1.0,
+        "correct": 1.0,
+        "grounded": 1.0
+      }
+    },
+    {
+      "example_id": "3hop1__131820_59747_43101",
+      "type": "3hop",
+      "question": "The Real Housewives series from the largest city of the state where WEKL transmits started when?",
+      "gold_answer": "October 7, 2008",
+      "hops_zh": "WEKL 发射地 → 佐治亚州 Augusta → 该州最大城市 Atlanta → 亚特兰大版《娇妻》何时开播",
+      "gold_titles": [
+        "List of municipalities in Georgia (U.S. state)",
+        "The Real Housewives of Atlanta",
+        "WEKL"
+      ],
+      "observed": {
+        "n_search": 2,
+        "delivered": 1.0,
+        "correct": 1.0,
+        "grounded": 1.0
+      }
+    },
+    {
+      "example_id": "3hop2__782397_223623_162182",
+      "type": "3hop",
+      "question": "In what region of Phu Luong's country is John Phan's birthplace located?",
+      "gold_answer": "South Central Coast",
+      "hops_zh": "Phu Luong 属于哪国 → 越南 → John Phan 出生地岘港 → 岘港属哪个大区",
+      "gold_titles": [
+        "John Phan",
+        "Phú Lương (mountain)",
+        "South Central Coast"
+      ],
+      "observed": {
+        "n_search": 3,
+        "delivered": 1.0,
+        "correct": 1.0,
+        "grounded": 1.0
+      }
+    },
+    {
+      "example_id": "3hop1__818422_160545_34751",
+      "type": "3hop",
+      "question": "What year did the country where the place of birth of Beatrice Heuser is located form an alliance with Japan?",
+      "gold_answer": "1941",
+      "hops_zh": "Beatrice Heuser 出生地曼谷 → 泰国 → 泰国哪年与日本结盟",
+      "gold_titles": [
+        "Bang Bon District",
+        "Beatrice Heuser",
+        "Pacific War"
+      ],
+      "observed": {
+        "n_search": 3,
+        "delivered": 1.0,
+        "correct": 1.0,
+        "grounded": 1.0
+      }
+    },
+    {
+      "example_id": "4hop3__39836_29339_508306_70744",
+      "type": "4hop",
+      "question": "Who won more national championships between the university featuring Fort Hill and the university of the state where Edwards won the primary besides the state where the Richmond Braves moved?",
+      "gold_answer": "University of South Carolina",
+      "hops_zh": "Fort Hill → Clemson 大学；Richmond Braves 迁往的州之外、Edwards 赢下初选的州 → 南卡 → 南卡大学 → 两校全国冠军数对比",
+      "gold_titles": [
+        "2004 United States presidential election",
+        "Clemson–South Carolina rivalry",
+        "Fort Hill (Clemson, South Carolina)",
+        "Richmond, Virginia"
+      ],
+      "observed": {
+        "n_search": 5,
+        "delivered": 1.0,
+        "correct": 1.0,
+        "grounded": 1.0
+      }
+    },
+    {
+      "example_id": "4hop3__387712_132409_371500_35031",
+      "type": "4hop",
+      "question": "Among the top five largest urban areas in the state Jacoby Shaddix' band formed in, where does the city Veoh's headquarters are located rank?",
+      "gold_answer": "third-largest",
+      "hops_zh": "Jacoby Shaddix 的乐队 Papa Roach → 加州组建 → 加州前五大城市群；Veoh 总部 → 圣迭戈 → 圣迭戈排第几",
+      "gold_titles": [
+        "Jacoby Shaddix",
+        "Papa Roach",
+        "San Diego",
+        "Veoh"
+      ],
+      "observed": {
+        "n_search": 3,
+        "delivered": 1.0,
+        "correct": 1.0,
+        "grounded": 1.0
+      }
+    },
+    {
+      "example_id": "4hop1__580153_49925_13759_736921",
+      "type": "4hop",
+      "question": "Where is the district that the person who wanted to reform and address the religion that practices candidacy preach a sermon on Marian devotion before his death located?",
+      "gold_answer": "Saxony-Anhalt",
+      "hops_zh": "practices candidacy 的宗教 → 路德宗 → 想改革它的人 → 马丁·路德 → 他临终前讲圣母崇敬布道的地点 → 该地所属区",
+      "gold_titles": [
+        "Candidacy",
+        "Mary, mother of Jesus",
+        "Reformation",
+        "Wittenberg (district)"
+      ],
+      "observed": {
+        "n_search": 4,
+        "delivered": 1.0,
+        "correct": 1.0,
+        "grounded": 1.0
+      }
+    }
+  ]
+}
