@@ -1,0 +1,715 @@
+{
+ "_doc": "MuSiQue 坏题体检表。**双审计**（两个模型独立判，都不是裁判模型）。consensus=true 表示两个模型都判坏。默认口径用 consensus（保守）；评测必须同时报剔除前/后两个数，静默剔除=刷分。",
+ "_calibration": {
+  "seed_labels": "9 坏 + 6 好，2026-08-04 人工逐题读原文标注（见 audit_dataset.py SEED_*）",
+  "gpt-5.6-luna": {
+   "n_bad": 29,
+   "recall_on_seed": 0.78,
+   "false_positive_on_seed": 0.17
+  },
+  "gpt-oss-120b": {
+   "n_bad": 20,
+   "recall_on_seed": 0.56,
+   "false_positive_on_seed": 0.17
+  },
+  "jaccard_between_auditors": 0.485,
+  "⚠️": "一致度仅 0.48 —— 「坏题」判定本身不稳。用不同的表，strong 臂的剔除后 correct 在 0.750~0.818 之间浮动，这是研究者自由度，报结论必须连同用了哪张表一起报。",
+  "circularity_check": "审计模型之一(luna)同时是 strong 臂的答题模型。检验：strong 从 luna 表 获益/从 oss 表获益 = 1.25，base 同比 = 1.48 —— strong 并未从「自己的模型判的表」里不成比例地获益，**未见循环污染**。"
+ },
+ "benchmark": "musique",
+ "n_audited": 90,
+ "consensus_bad": [
+  "2hop__278022_71701",
+  "2hop__286621_84856",
+  "2hop__61664_786853",
+  "2hop__68322_510545",
+  "3hop1__454441_55349_651302",
+  "3hop1__857_846_7713",
+  "3hop2__20335_82856_9331",
+  "3hop2__326964_811351_7713",
+  "4hop1__131002_53706_795904_580996",
+  "4hop1__60000_59747_211319_557671",
+  "4hop1__76111_624859_355213_203322",
+  "4hop1__89632_32392_823060_610794",
+  "4hop1__9007_698949_157828_239539",
+  "4hop2__161602_474028_88460_21074",
+  "4hop3__279362_88460_30152_20999",
+  "4hop3__322354_466199_695123_72134"
+ ],
+ "any_bad": [
+  "2hop__124592_402641",
+  "2hop__278022_71701",
+  "2hop__286621_84856",
+  "2hop__57638_90991",
+  "2hop__59612_50883",
+  "2hop__61664_786853",
+  "2hop__68322_510545",
+  "2hop__77601_814677",
+  "3hop1__136129_87694_64412",
+  "3hop1__222497_309482_89834",
+  "3hop1__454441_55349_651302",
+  "3hop1__804367_160713_77246",
+  "3hop1__857_846_7713",
+  "3hop2__132957_593597_40768",
+  "3hop2__20335_82856_9331",
+  "3hop2__326964_811351_7713",
+  "3hop2__72083_92991_76291",
+  "4hop1__131002_53706_795904_580996",
+  "4hop1__152146_5274_458768_33677",
+  "4hop1__178366_229349_66759_75165",
+  "4hop1__342858_131850_33952_33939",
+  "4hop1__436202_765799_282674_759393",
+  "4hop1__60000_59747_211319_557671",
+  "4hop1__638988_17130_70784_61381",
+  "4hop1__76111_624859_355213_203322",
+  "4hop1__89632_32392_823060_610794",
+  "4hop1__9007_698949_157828_239539",
+  "4hop1__93963_170667_443779_52195",
+  "4hop2__161602_474028_88460_21074",
+  "4hop2__5206_14670_8987_8529",
+  "4hop2__71753_685934_70784_79935",
+  "4hop3__279362_88460_30152_20999",
+  "4hop3__322354_466199_695123_72134"
+ ],
+ "multi_answer": [
+  "2hop__124592_402641",
+  "2hop__158275_35739",
+  "2hop__191125_781346",
+  "2hop__39954_80303",
+  "2hop__95794_55227",
+  "3hop1__222497_309482_89834",
+  "3hop1__354480_834494_33939",
+  "4hop1__436202_765799_282674_759393",
+  "4hop1__726152_153080_33897_81096",
+  "4hop1__813171_153080_33897_81096"
+ ],
+ "questions": {
+  "2hop__77601_814677": {
+   "question": "What pantheon is the God of the underworld in ancient Egypt a part of?",
+   "gold": "ancient Egyptian religion",
+   "flagged_by": {
+    "gpt-5.6-luna": {
+     "flags": [
+      "答案类型不符"
+     ],
+     "reason": "The gold answer names a religion rather than the pantheon requested."
+    }
+   },
+   "multi_answer": false,
+   "consensus": false
+  },
+  "2hop__278022_71701": {
+   "question": "what year did the Japanese get to city where Wang Yue died and the rest of Guangdong province?",
+   "gold": "November 5",
+   "flagged_by": {
+    "gpt-5.6-luna": {
+     "flags": [
+      "答案类型不匹配：问句要 year，gold 是 'November 5'",
+      "问句不成立",
+      "gold 推不出",
+      "答案类型不符"
+     ],
+     "reason": "The question asks for a year and conflates the dates for capturing Foshan and the rest of Guangdong, while the gold answer is only a month and day."
+    },
+    "gpt-oss-120b": {
+     "flags": [
+      "答案类型不匹配：问句要 year，gold 是 'November 5'",
+      "gold 推不出",
+      "答案类型不符"
+     ],
+     "reason": "Gold answer is a month-day, not a year, and the passage does not state the year."
+    }
+   },
+   "multi_answer": false,
+   "consensus": true
+  },
+  "2hop__61664_786853": {
+   "question": "Who is the spouse of the voice actor of Batman in The Lego Batman Movie?",
+   "gold": "Amy Poehler",
+   "flagged_by": {
+    "gpt-5.6-luna": {
+     "flags": [
+      "gold 推不出"
+     ],
+     "reason": "The provided passages identify Will Arnett but do not establish that Amy Poehler is his spouse."
+    },
+    "gpt-oss-120b": {
+     "flags": [
+      "gold 推不出"
+     ],
+     "reason": "Passages do not provide evidence that Amy Poehler is Will Arnett's spouse"
+    }
+   },
+   "multi_answer": false,
+   "consensus": true
+  },
+  "2hop__68322_510545": {
+   "question": "Who is the spouse of the actor that plays Jarvis in the Avengers Age of Ultron?",
+   "gold": "Jennifer Connelly",
+   "flagged_by": {
+    "gpt-5.6-luna": {
+     "flags": [
+      "gold 推不出"
+     ],
+     "reason": "The passage identifies Paul Bettany and Jennifer Connelly as co-stars but does not establish that they are spouses."
+    },
+    "gpt-oss-120b": {
+     "flags": [
+      "gold 推不出"
+     ],
+     "reason": "Passage does not provide spouse information for Paul Bettany"
+    }
+   },
+   "multi_answer": false,
+   "consensus": true
+  },
+  "2hop__57638_90991": {
+   "question": "Who was picked over the player with the highest point average in NBA history in the draft?",
+   "gold": "Greg Oden",
+   "flagged_by": {
+    "gpt-5.6-luna": {
+     "flags": [
+      "问句不成立",
+      "gold 推不出"
+     ],
+     "reason": "The question incorrectly identifies Kevin Durant as the player with the highest point average in NBA history, whereas the passage says Wilt Chamberlain holds the all-time record."
+    }
+   },
+   "multi_answer": false,
+   "consensus": false
+  },
+  "2hop__59612_50883": {
+   "question": "The London broil cut comes from a country with an emergency response guidebook with response guides in which section?",
+   "gold": "The fourth section, with orange page borders",
+   "flagged_by": {
+    "gpt-5.6-luna": {
+     "flags": [
+      "问句不成立"
+     ],
+     "reason": "The question incorrectly treats “North American,” which is a region rather than a country, as the source country."
+    }
+   },
+   "multi_answer": false,
+   "consensus": false
+  },
+  "2hop__286621_84856": {
+   "question": "When does the new season of the show named for the Politically Incorrect cast member?",
+   "gold": "January 20, 2017",
+   "flagged_by": {
+    "gpt-5.6-luna": {
+     "flags": [
+      "gold 推不出"
+     ],
+     "reason": "The provided passage identifies the show but does not state or support a January 20, 2017 season start date."
+    },
+    "gpt-oss-120b": {
+     "flags": [
+      "gold 推不出"
+     ],
+     "reason": "The provided passage does not contain the date January 20, 2017 for the new season start."
+    }
+   },
+   "multi_answer": false,
+   "consensus": true
+  },
+  "3hop1__454441_55349_651302": {
+   "question": "What is the birthplace of the man who does the voice of Stan on the series that includes the episode The Hobbit?",
+   "gold": "Denver",
+   "flagged_by": {
+    "gpt-5.6-luna": {
+     "flags": [
+      "gold 推不出"
+     ],
+     "reason": "The passage gives Denver as Dian Bachar's birthplace, not Trey Parker's, so it does not support the gold answer."
+    },
+    "gpt-oss-120b": {
+     "flags": [
+      "gold 推不出"
+     ],
+     "reason": "Gold answer not supported by the provided passages; Trey Parker's birthplace is not given, so Denver cannot be derived"
+    }
+   },
+   "multi_answer": false,
+   "consensus": true
+  },
+  "3hop2__72083_92991_76291": {
+   "question": "When did the party that gained control of Congress in the midterm elections in 1946 take control of the government branch that determines the rules of the US House?",
+   "gold": "January 2015",
+   "flagged_by": {
+    "gpt-5.6-luna": {
+     "flags": [
+      "问句不成立"
+     ],
+     "reason": "The Senate determines its own rules, not the rules of the US House, so the question's description of the target chamber is false."
+    }
+   },
+   "multi_answer": false,
+   "consensus": false
+  },
+  "3hop2__132957_593597_40768": {
+   "question": "When did the maker of Acura Legend, the manufacturer of Scion Fuse and Nissan open US assembly plants?",
+   "gold": "1981",
+   "flagged_by": {
+    "gpt-5.6-luna": {
+     "flags": [
+      "gold 推不出"
+     ],
+     "reason": "The passage says the openings occurred a decade after 1973, around 1983, rather than supporting 1981."
+    }
+   },
+   "multi_answer": false,
+   "consensus": false
+  },
+  "3hop1__857_846_7713": {
+   "question": "How long was the city where the Yongle Emperor greeted the leader that the edict was addressed to, the capital city of Yangzhou?",
+   "gold": "about 400 years",
+   "flagged_by": {
+    "gpt-5.6-luna": {
+     "flags": [
+      "问句不成立",
+      "gold 推不出"
+     ],
+     "reason": "The question incorrectly identifies Nanjing as the capital city of Yangzhou, and the passage does not support the claimed duration for that relation."
+    },
+    "gpt-oss-120b": {
+     "flags": [
+      "gold 推不出"
+     ],
+     "reason": "Passage does not provide the duration of Nanjing being the capital of Yangzhou, so gold answer not derivable"
+    }
+   },
+   "multi_answer": false,
+   "consensus": true
+  },
+  "3hop1__222497_309482_89834": {
+   "question": "When did the merchant of the city where the composer of Al gran sole carico d'amore takes place?",
+   "gold": "16th - century",
+   "flagged_by": {
+    "gpt-5.6-luna": {
+     "flags": [
+      "问句不成立"
+     ],
+     "reason": "The phrasing incorrectly says that the composer takes place and presupposes an incoherent relation between the composer and the city."
+    }
+   },
+   "multi_answer": true,
+   "consensus": false
+  },
+  "3hop2__326964_811351_7713": {
+   "question": "How long had Lijia Zhang's birthplace been the capitol city of Yaxing Coach's headquarters location?",
+   "gold": "about 400 years",
+   "flagged_by": {
+    "gpt-5.6-luna": {
+     "flags": [
+      "问句不成立",
+      "gold 推不出"
+     ],
+     "reason": "Nanjing is not the capital city of Yangzhou, and the cited passage does not establish the claimed duration for that relation."
+    },
+    "gpt-oss-120b": {
+     "flags": [
+      "问句不成立",
+      "gold 推不出"
+     ],
+     "reason": "The question asks how long Nanjing was the capital of Yangzhou, which is incoherent because a city cannot be the capital of another city; the premise is false and the passages do not support such a re"
+    }
+   },
+   "multi_answer": false,
+   "consensus": true
+  },
+  "3hop1__136129_87694_64412": {
+   "question": "When did the place where the head of the catholic region named after the same saint as the Dakovo Cathedral become its own country?",
+   "gold": "11 February 1929",
+   "flagged_by": {
+    "gpt-5.6-luna": {
+     "flags": [
+      "问句不成立"
+     ],
+     "reason": "The phrase “head of the catholic region” is incoherent and does not clearly identify Vatican City as the place being asked about."
+    }
+   },
+   "multi_answer": false,
+   "consensus": false
+  },
+  "3hop2__20335_82856_9331": {
+   "question": "What dissolved the privileges in Poland of the empire that helped the patriots during the Revolutionary War, the Kingdom that acquired some Thuringian territory in 1815, and the Habsburg Monarchy?",
+   "gold": "March Constitution of Poland",
+   "flagged_by": {
+    "gpt-5.6-luna": {
+     "flags": [
+      "问句不成立",
+      "gold 推不出"
+     ],
+     "reason": "The question falsely treats the Russian Empire, Prussia, and the Habsburg Monarchy as having privileges in Poland that were dissolved by the March Constitution, and the supplied passage does not estab"
+    },
+    "gpt-oss-120b": {
+     "flags": [
+      "问句不成立",
+      "gold 推不出"
+     ],
+     "reason": "Question is incoherent and gold answer not supported by passages"
+    }
+   },
+   "multi_answer": false,
+   "consensus": true
+  },
+  "4hop2__5206_14670_8987_8529": {
+   "question": "When was \"Slavs\" used in the national anthem of the country whose military having the Air Defense Artillery was unprepared for the invasion of the country conquered by the Pact?",
+   "gold": "1943–1992",
+   "flagged_by": {
+    "gpt-5.6-luna": {
+     "flags": [
+      "问句不成立"
+     ],
+     "reason": "The question incorrectly links the U.S. Army's Air Defense Artillery to Yugoslavia's unprepared military, so its identifying clause is false or incoherent."
+    }
+   },
+   "multi_answer": false,
+   "consensus": false
+  },
+  "4hop1__9007_698949_157828_239539": {
+   "question": "The original language of the film titled and about the city of Tito's final resting place is the co-official language of a country. Where are the headquarters for that country's national radio and TV broadcaster?",
+   "gold": "Pristina",
+   "flagged_by": {
+    "gpt-5.6-luna": {
+     "flags": [
+      "gold 推不出"
+     ],
+     "reason": "The provided passage does not state that the national broadcaster's headquarters are in Pristina."
+    },
+    "gpt-oss-120b": {
+     "flags": [
+      "gold 推不出"
+     ],
+     "reason": "Gold answer not supported by the given passage"
+    }
+   },
+   "multi_answer": false,
+   "consensus": true
+  },
+  "4hop1__76111_624859_355213_203322": {
+   "question": "What county shares a border with the county where the singer of Hungry Eyes from the movie Dirty Dancing was born?",
+   "gold": "Cabarrus County",
+   "flagged_by": {
+    "gpt-5.6-luna": {
+     "flags": [
+      "gold 推不出"
+     ],
+     "reason": "The chain conflates Cleveland, Ohio, with Cleveland, North Carolina, so Cabarrus County does not follow."
+    },
+    "gpt-oss-120b": {
+     "flags": [
+      "gold 推不出"
+     ],
+     "reason": "Gold answer Cabarrus County is not supported by the passages; the singer was born in Cleveland, Ohio (Cuyahoga County), not Rowan County."
+    }
+   },
+   "multi_answer": false,
+   "consensus": true
+  },
+  "4hop2__161602_474028_88460_21074": {
+   "question": "Who runs the school system in the country on the natural boundary between the country that hosted the tournament and the country where A Don is from?",
+   "gold": "the Ministry of Education",
+   "flagged_by": {
+    "gpt-5.6-luna": {
+     "flags": [
+      "问句不成立"
+     ],
+     "reason": "Myanmar is a country, not a natural boundary between Thailand and Laos, so the composed question presupposes a false relation."
+    },
+    "gpt-oss-120b": {
+     "flags": [
+      "问句不成立"
+     ],
+     "reason": "question presupposes a false premise about a country on the natural boundary between Thailand and Laos"
+    }
+   },
+   "multi_answer": false,
+   "consensus": true
+  },
+  "4hop3__279362_88460_30152_20999": {
+   "question": "How were people from whom new coins were a proclamation of independence by the Somali Muslim Ajuran Empire expelled from the natural boundary between Thailand and Vat Yotkeo's country?",
+   "gold": "The dynasty regrouped and defeated the Portuguese",
+   "flagged_by": {
+    "gpt-5.6-luna": {
+     "flags": [
+      "问句不成立"
+     ],
+     "reason": "The question incoherently treats Myanmar as a natural boundary between Thailand and Laos."
+    },
+    "gpt-oss-120b": {
+     "flags": [
+      "问句不成立"
+     ],
+     "reason": "question presupposes Myanmar as a natural boundary between Thailand and Laos, which is false"
+    }
+   },
+   "multi_answer": false,
+   "consensus": true
+  },
+  "4hop2__71753_685934_70784_79935": {
+   "question": "When was the region that lies to the north of the region Israel is located and where The World is located created?",
+   "gold": "1930",
+   "flagged_by": {
+    "gpt-5.6-luna": {
+     "flags": [
+      "问句不成立"
+     ],
+     "reason": "The question incorrectly treats Saudi Arabia as a region north of both the Middle East and the Persian Gulf, so the composed relation is incoherent."
+    }
+   },
+   "multi_answer": false,
+   "consensus": false
+  },
+  "4hop1__178366_229349_66759_75165": {
+   "question": "There is a state A where Storm of the Century was filmed based on the book by the author who wrote a short story featuring the author of This Is My God. What is the population of state A?",
+   "gold": "1,335,907",
+   "flagged_by": {
+    "gpt-5.6-luna": {
+     "flags": [
+      "问句不成立",
+      "gold 推不出"
+     ],
+     "reason": "The passage identifies Maine as the story's setting, not the filming location, so the question's premise and the Maine population answer are unsupported."
+    }
+   },
+   "multi_answer": false,
+   "consensus": false
+  },
+  "4hop1__342858_131850_33952_33939": {
+   "question": "What was the population in 1900 of the second largest city in the US state having the Library District of the county containing Yuma?",
+   "gold": "7,531",
+   "flagged_by": {
+    "gpt-5.6-luna": {
+     "flags": [
+      "问句不成立"
+     ],
+     "reason": "The chain identifies Yuma County, Colorado, but then switches to the Yuma County Library District in Arizona, making the composed reference inconsistent."
+    }
+   },
+   "multi_answer": false,
+   "consensus": false
+  },
+  "4hop1__638988_17130_70784_61381": {
+   "question": "When was the region immediately north of the region where the country in which Aluf can be found is located and the Persian Gulf established?",
+   "gold": "1932",
+   "flagged_by": {
+    "gpt-5.6-luna": {
+     "flags": [
+      "问句不成立",
+      "gold 推不出"
+     ],
+     "reason": "The phrasing does not coherently identify Saudi Arabia as a region immediately north of the Middle East and the Persian Gulf, so the queried entity and its founding date are unsupported."
+    }
+   },
+   "multi_answer": false,
+   "consensus": false
+  },
+  "4hop1__89632_32392_823060_610794": {
+   "question": "Which country contains the city sharing border with the state capital of the US state filming the movie the patriot?",
+   "gold": "Richland County",
+   "flagged_by": {
+    "gpt-5.6-luna": {
+     "flags": [
+      "答案类型不匹配：问句要 country，gold 是 'Richland County'",
+      "gold 推不出",
+      "答案类型不符"
+     ],
+     "reason": "The gold answer is a county, not a country, and the passages do not support it as the answer to the stated relation."
+    },
+    "gpt-oss-120b": {
+     "flags": [
+      "答案类型不匹配：问句要 country，gold 是 'Richland County'",
+      "gold 推不出",
+      "答案类型不符"
+     ],
+     "reason": "Gold answer is a county, but the question asks for a country"
+    }
+   },
+   "multi_answer": false,
+   "consensus": true
+  },
+  "4hop1__60000_59747_211319_557671": {
+   "question": "What county borders the county with the largest city in the state where Birth of a Nation was filmed?",
+   "gold": "Presque Isle County",
+   "flagged_by": {
+    "gpt-5.6-luna": {
+     "flags": [
+      "gold 推不出"
+     ],
+     "reason": "The passages do not establish that Presque Isle County borders the county containing Atlanta, Georgia."
+    },
+    "gpt-oss-120b": {
+     "flags": [
+      "gold 推不出"
+     ],
+     "reason": "Gold answer Presque Isle County is not supported by the passages and does not border the county containing Atlanta"
+    }
+   },
+   "multi_answer": false,
+   "consensus": true
+  },
+  "4hop1__152146_5274_458768_33677": {
+   "question": "When was the most recent Bicycle Friendly Community Award given to the city where the headquarters of the only group larger than Långa nätter's record label is located?",
+   "gold": "2013",
+   "flagged_by": {
+    "gpt-5.6-luna": {
+     "flags": [
+      "gold 推不出"
+     ],
+     "reason": "The passage supports the 2013 award in Santa Monica but does not establish that Universal Music Group's headquarters is located there."
+    }
+   },
+   "multi_answer": false,
+   "consensus": false
+  },
+  "4hop3__322354_466199_695123_72134": {
+   "question": "When did the city that WIZE is licensed to broadcast to, become the capital of the state, that contains the county where the Battle of Rich Mountain occurred?",
+   "gold": "1839",
+   "flagged_by": {
+    "gpt-5.6-luna": {
+     "flags": [
+      "问句不成立",
+      "gold 推不出"
+     ],
+     "reason": "The chain conflates Randolph County, West Virginia, with Randolph County, Illinois, and WIZE's Springfield, Ohio, with Springfield, Illinois, so the question presupposes a false connection."
+    },
+    "gpt-oss-120b": {
+     "flags": [
+      "问句不成立",
+      "gold 推不出"
+     ],
+     "reason": "question presupposes Springfield became capital of the state containing Randolph County (West Virginia), which never happened"
+    }
+   },
+   "multi_answer": false,
+   "consensus": true
+  },
+  "4hop1__131002_53706_795904_580996": {
+   "question": "What city shares a border with the city where a person went to work during the gold rush in the state where the Shakespeare Bridge is located?",
+   "gold": "Rio Linda",
+   "flagged_by": {
+    "gpt-5.6-luna": {
+     "flags": [
+      "gold 推不出",
+      "答案类型不符"
+     ],
+     "reason": "The passages do not establish that Rio Linda borders Sacramento, and Rio Linda is identified as a community rather than a city."
+    },
+    "gpt-oss-120b": {
+     "flags": [
+      "gold 推不出"
+     ],
+     "reason": "Gold answer Rio Linda is not shown in the passages to share a border with Sacramento"
+    }
+   },
+   "multi_answer": false,
+   "consensus": true
+  },
+  "2hop__191125_781346": {
+   "question": "What place does the administrative territorial entity that Juba is located in share a border with?",
+   "gold": "Eastern Equatoria",
+   "flagged_by": {},
+   "multi_answer": true,
+   "consensus": false
+  },
+  "2hop__124592_402641": {
+   "question": "Who is the other child of Chian Hsiao-chang's father?",
+   "gold": "Chiang Hsiao-wu",
+   "flagged_by": {
+    "gpt-oss-120b": {
+     "flags": [
+      "问句不成立"
+     ],
+     "reason": "question presumes a single other child but the father has multiple children"
+    }
+   },
+   "multi_answer": true,
+   "consensus": false
+  },
+  "2hop__39954_80303": {
+   "question": "What is the name of the game reserve in the country where hunters spend 50 to 100 times more than the average ecotourist?",
+   "gold": "The Selous Game Reserve",
+   "flagged_by": {},
+   "multi_answer": true,
+   "consensus": false
+  },
+  "3hop1__354480_834494_33939": {
+   "question": "What was the population of the city that is found in the same county as Eric Marcus Municipal Airport in 1900?",
+   "gold": "7,531",
+   "flagged_by": {},
+   "multi_answer": true,
+   "consensus": false
+  },
+  "4hop1__436202_765799_282674_759393": {
+   "question": "What is the seat of the county sharing a border with the county in which J. P. Hayes was born?",
+   "gold": "Green Bay",
+   "flagged_by": {
+    "gpt-oss-120b": {
+     "flags": [
+      "gold 推不出"
+     ],
+     "reason": "Gold answer not directly supported by the provided passages"
+    }
+   },
+   "multi_answer": true,
+   "consensus": false
+  },
+  "4hop1__813171_153080_33897_81096": {
+   "question": "Who won the indy car race in the largest populated city in the state that the performer of Changes Two is from?",
+   "gold": "Mario Andretti",
+   "flagged_by": {},
+   "multi_answer": true,
+   "consensus": false
+  },
+  "4hop1__726152_153080_33897_81096": {
+   "question": "Who won the Indy Car Race in the largest populated city of the state where the performer of Tijuana Moods is from?",
+   "gold": "Mario Andretti",
+   "flagged_by": {},
+   "multi_answer": true,
+   "consensus": false
+  },
+  "3hop1__804367_160713_77246": {
+   "question": "What is the meaning of the word that is also the majority religion in the area that became India when the country where Kot Haibat is located was created in the Arabic dictionary?",
+   "gold": "the country of India",
+   "flagged_by": {
+    "gpt-oss-120b": {
+     "flags": [
+      "gold 推不出"
+     ],
+     "reason": "passages do not provide that 'Hindu' means 'the country of India'"
+    }
+   },
+   "multi_answer": false,
+   "consensus": false
+  },
+  "4hop1__93963_170667_443779_52195": {
+   "question": "Who is the president of the newly declared independent country, that established the Timor Leste Commission of Truth and Friendship, with the country containing the airport that includes Lion Air?",
+   "gold": "Francisco Guterres",
+   "flagged_by": {
+    "gpt-oss-120b": {
+     "flags": [
+      "gold 推不出"
+     ],
+     "reason": "Gold answer not supported by the given passages"
+    }
+   },
+   "multi_answer": false,
+   "consensus": false
+  },
+  "2hop__158275_35739": {
+   "question": "When was one internet browser's version of Windows 8 made accessible?",
+   "gold": "September 2013",
+   "flagged_by": {},
+   "multi_answer": true,
+   "consensus": false
+  },
+  "2hop__95794_55227": {
+   "question": "In Grown Ups, who is married to the actor who also starred in Here Comes the Boom?",
+   "gold": "Maria Bello",
+   "flagged_by": {},
+   "multi_answer": true,
+   "consensus": false
+  }
+ }
+}
