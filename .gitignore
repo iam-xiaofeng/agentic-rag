@@ -1,5 +1,7 @@
 .venv/
 .env
+# 模型 → 网关端点注册表（含真实 key）。模板 endpoints.example.json **入库**。
+endpoints.json
 __pycache__/
 *.pyc
 .chroma/

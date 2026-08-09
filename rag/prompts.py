@@ -86,3 +86,76 @@ links, this block has exactly 2 lines. For any link you could not support, add i
 Those `unsupported:` lines are expected and cost you nothing. A fabricated quote costs you \
 everything. If you never called the tool, or it returned nothing, write `KEY EVIDENCE: none`.
 """
+
+# ═══════════════════════════════════════════════════════════════════════════
+# planner 臂（`RAG_AGENT=planner`，见 rag/agent.py）—— 三段提示词，每段只做一件事。
+#
+# 为什么另起一套而不是继续改上面那个：上面那版**已经被冻结**（它的 sha 是 react 臂跨实验可比的
+# 依据）。而 planner 的赌注根本不在措辞上 —— 是把"缺哪一环就搜哪一环"变成**控制流**。
+# 两次改措辞（v2 反向、v3 持平）已经证明这件事推不动，见文件头。
+#
+# ⚠️ planner 臂的 KEY EVIDENCE 块**不由模型写**，而是由 rag/agent.py 从每一跳的 quote
+# **确定性拼出来**。所以 planner vs react 的差值里同时含"控制流"和"引用机制"两个变化 ——
+# 这是有意的复合改动（引用变成控制流的副产品，而不是自述），报结论时必须一起报，不能拆着说。
+# ═══════════════════════════════════════════════════════════════════════════
+
+PLANNER_PLAN = """Break this question into an ordered chain of retrieval steps.
+
+QUESTION: {q}
+
+A chain step names ONE fact to look up. When a later step needs the answer of an earlier one, \
+write `#1`, `#2` … in its query as a placeholder — it will be substituted with what step 1, 2 … \
+actually found before that search runs. This is the point of the chain: do not try to guess the \
+bridge entity yourself, leave a placeholder for it.
+
+Rules:
+- At most {max_hops} steps. Use exactly as many as the question needs — a single-fact question \
+gets one step.
+- `query` is what will be typed into a keyword+semantic search over an encyclopedia. Write it as \
+a short noun phrase, not a sentence.
+- Do not answer the question. Do not add steps that merely restate the final question.
+
+Reply with ONLY a JSON array, no prose and no code fence:
+[{{"goal": "<the fact this step must find>", "query": "<search query, may contain #1>"}}]"""
+
+PLANNER_EXTRACT = """Read the snippets and report ONLY what they support.
+
+WHAT TO FIND: {goal}
+
+SNIPPETS:
+{snippets}
+
+There are three honest outcomes, and you must pick the weakest one that is still true:
+
+- `"basis": "stated"` — one snippet says it outright. Put that sentence in `quote`, copied \
+character-for-character.
+- `"basis": "inferred"` — no single snippet says it, but two or more together make it certain \
+(e.g. one says X is in county C, another says C's seat is Y). Put the sentences you combined in \
+`quote` (join them with " | ") and say in one line in `how` which step you took. This is a \
+legitimate answer, not a guess — but only when the snippets force the conclusion.
+- `"basis": "none"` — the snippets do not settle it. Then `"answer": null`. This is a normal, \
+expected outcome and is always better than a guess.
+
+Never put a sentence in `quote` that you did not copy from a snippet above. Never use your own \
+background knowledge as one of the combined steps — every link must come from a snippet.
+
+Reply with ONLY a JSON object, no prose and no code fence:
+{{"answer": "<the value, or null>", "basis": "stated|inferred|none", "quote": "<verbatim sentence(s), or \\"\\">", "how": "<one line, only when inferred>", "source": "<the [source: ...] tag(s)>"}}"""
+
+PLANNER_SYNTH = """Answer the question using ONLY the chain of facts retrieved below.
+
+QUESTION: {q}
+
+CHAIN (each link was looked up in the knowledge base; `NOT FOUND` means it was not established. \
+Links marked `inferred` were derived by combining retrieved snippets — they are legitimate \
+evidence, not guesses, and you should use them):
+{chain}
+
+State the answer in one sentence, then show the chain briefly. If a link was `inferred`, still \
+give the answer — just say which step was a combination rather than a direct statement. Only if \
+a link says `NOT FOUND` should you say plainly which link is missing and give the answer as \
+tentative, or say you could not find it. Never substitute your own background knowledge for a \
+`NOT FOUND` link.
+
+Write prose only. Do not write a KEY EVIDENCE block — the evidence is attached automatically \
+from the chain above."""

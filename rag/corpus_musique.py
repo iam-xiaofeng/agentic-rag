@@ -27,6 +27,7 @@ from __future__ import annotations
 import functools
 import hashlib
 import os
+import re
 
 from rag.retriever import Doc
 
@@ -81,10 +82,52 @@ class _Ex:
                         "reference_contexts": facts}
 
 
-def load_questions(split: str = _SPLIT) -> tuple[list[_Ex], dict[str, str]]:
-    """返回 (examples, {question: "2hop"|"3hop"|"4hop"})。只要 answerable 的题。
+def _one_hop(r: dict) -> _Ex | None:
+    """把一道多跳题的**第 1 步**取出来当**单跳题**。
+
+    为什么这是这个项目能拿到的最干净的单跳集：
+      · **同一份语料、同一个检索器**（第 1 步的支撑段就在那 21100 段里），
+        所以「1hop vs 2/3/4hop」是一条**纯跳数轴**，没混进换语料、换 gold 口径这些变量；
+      · gold 段由 `paragraph_support_idx` 精确给出，`delivered` 依旧是确定性的；
+      · 第 1 步**按定义不依赖任何前序答案**（依赖图里它是 root），所以自足。
+
+    三道过滤，缺一不可（前两道是显然的，**第三道是实测踩出来的**）：
+      ① 丢掉 `X >> relation` 模板式的 —— 不是人会打出来的 query，
+         拿它测检索会把"看不懂模板"和"检索不到"混在一起；
+      ② 丢掉含 `#N` 的 —— 那说明它引用了前序答案，不自足；
+      ③ **丢掉指代无先行词的** —— 实测 30 题里 2 道栽在这儿：
+         "What part of the country is it about?"（`it` 指什么？）、
+         "Who hosted the tournament?"（哪个 tournament？）。
+         这些问句在**母问句的上下文里**是清楚的，单独拎出来就不可答了。
+         判据：问句里必须有**专有名词或数字**（自足的事实型问句几乎总会点名实体）。
+    """
+    h = (r.get("question_decomposition") or [None])[0]
+    if not h:
+        return None
+    q = (h.get("question") or "").strip()
+    if not q or ">>" in q or "#" in q:                 # ①② 模板式 / 引用了前序答案
+        return None
+    body = q.split(None, 1)[1] if " " in q else ""     # 去掉首词（句首大写不算专有名词）
+    if not re.search(r"\b[A-Z][\w'’-]+|\d", body):     # ③ 没有专有名词也没有数字 → 多半指代不明
+        return None
+    p = {x["idx"]: x for x in r["paragraphs"]}.get(h.get("paragraph_support_idx"))
+    if not p or not (p.get("paragraph_text") or "").strip():
+        return None
+    e = _Ex.__new__(_Ex)
+    e.id = f"1hop__{r['id']}"
+    e.inputs = {"question": q}
+    e.outputs = {"reference": h.get("answer") or "", "gold_titles": [(p.get("title") or "").strip()],
+                 "reference_contexts": [(p.get("paragraph_text") or "").strip()]}
+    return e
+
+
+def load_questions(split: str = _SPLIT, with_1hop: bool = False) -> tuple[list[_Ex], dict[str, str]]:
+    """返回 (examples, {question: "1hop"|"2hop"|"3hop"|"4hop"})。只要 answerable 的题。
 
     题型直接用**跳数**——它就是这个数据集的难度轴，且 4hop 是唯一"一次检索只有 1/3 能拿全"的子集。
+
+    `with_1hop=True` 额外挂上由每题第 1 步派生的**单跳**题（见 `_one_hop`）：
+    同语料、同检索器、同确定性口径，用来给多跳那几档做**难度轴的下端锚点**。
     """
     ex, qtype = [], {}
     for r in _raw(split):
@@ -95,6 +138,9 @@ def load_questions(split: str = _SPLIT) -> tuple[list[_Ex], dict[str, str]]:
             continue
         ex.append(e)
         qtype[r["question"]] = f"{len(r['question_decomposition'])}hop"
+        if with_1hop and (one := _one_hop(r)) is not None and one.inputs["question"] not in qtype:
+            ex.append(one)
+            qtype[one.inputs["question"]] = "1hop"
     return ex, qtype
 
 

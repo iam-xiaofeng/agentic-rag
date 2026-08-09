@@ -16,8 +16,8 @@ from __future__ import annotations
 
 # 让 `python evals/xxx.py` 直接可跑：把仓库根放进 sys.path（否则 rag.* 导不到）。
 import pathlib as _pl, sys as _sys
-if str(_pl.Path(__file__).resolve().parents[1]) not in _sys.path:
-    _sys.path.insert(0, str(_pl.Path(__file__).resolve().parents[1]))
+if str(_pl.Path(__file__).resolve().parents[2]) not in _sys.path:
+    _sys.path.insert(0, str(_pl.Path(__file__).resolve().parents[2]))
 
 import argparse
 import json
@@ -27,7 +27,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 from langsmith import Client
 
-from evals.eval_common import SPECS, call_judge, make_judges
+from evals.archive.eval_common import SPECS, call_judge, make_judges
 from rag.llm import build_judge
 
 DATA = pathlib.Path(__file__).resolve().parents[1] / "data"

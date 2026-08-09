@@ -23,9 +23,16 @@ from rag.retriever_bm25 import BM25Retriever
 from rag.retriever_dense import DenseRetriever
 
 _RERANKER = "BAAI/bge-reranker-v2-m3"
-# 池的**信息量**要与 chunk 匹配：pool×chunk ≈ 恒定（实验19 ⑥）。chunk=600 下 100→200 有收益、
-# 200→300 只涨池覆盖不涨交付。可用 RAG_POOL 在 shell 层覆盖，用于新旧配置整体 A/B。
-_POOL = int(os.environ.get("RAG_POOL", 200))
+# **pool = 进 cross-encoder 之前的候选数**（这 pool 条要逐对过一遍 reranker，算力与它成正比）。
+#
+# 定为 50 的依据是**逐跳召回**（`evals/eval_hop.py`，900 次单跳检索）：给定该跳理想的 query，
+# 它那一段进 top-k 的比例 —— pool 25/50/100/200 分别是 0.941/0.941/0.933/0.930（k=8）。
+# **池内覆盖一路涨（0.956→0.985）而召回反而跌**：多进池的候选 reranker 排不上来，还挤掉真证据。
+# pool=200 花 4.9 倍算力，换来的是**负的点估计**。
+#
+# ⚠️ 旧值是 200，来自实验19⑥ —— 那次是在 `reranker=None` 下量的**池覆盖**，
+# 根本没量交付。**没有成本项的上游代理量单调随 pool 上升，永远支持「再开大一点」。**
+_POOL = int(os.environ.get("RAG_POOL", 50))
 
 
 def _minmax(x: np.ndarray) -> np.ndarray:
@@ -41,7 +48,7 @@ class HybridRetriever:
         docs: list[Doc],
         w_bm25: float = 0.5,
         w_dense: float = 0.5,
-        pool: int = _POOL,
+        pool: int | None = None,
         reranker=_RERANKER,  # 模型名(→CrossEncoder) 或已构建的重排器对象(有 .predict，如 QwenReranker)
                              # 或 None = 不加载重排器（只用 _fuse，给融合层的对照实验省显存）
         fusion: str = "rrf",
@@ -55,7 +62,9 @@ class HybridRetriever:
         self.docs = docs
         self.bm25 = bm25 if bm25 is not None else BM25Retriever(docs)
         self.dense = dense if dense is not None else DenseRetriever(docs)
-        self.w_bm25, self.w_dense, self.pool = w_bm25, w_dense, pool
+        # pool 同理：构造时才读 env，好让 run_matrix.py 的 pool= 臂参数在同进程里生效。
+        self.w_bm25, self.w_dense = w_bm25, w_dense
+        self.pool = pool if pool is not None else int(os.environ.get("RAG_POOL", _POOL))
         self.fusion, self._rrf_k = fusion, rrf_k
         self.max_per_source = max_per_source
         if reranker is None:                      # 不重排（只测召回/融合）

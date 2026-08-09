@@ -20,6 +20,15 @@ from rag.retriever import Retriever
 # 0.749 → 0.779（每型 60 题实测，三个题型齐涨）。RAG_TOPK 可在 shell 层覆盖，用于新旧配置 A/B。
 _TOPK = int(os.environ.get("RAG_TOPK", 32))
 
+
+def topk() -> int:
+    """当前生效的 k（交付给模型的片段数）。planner 臂与 runctx 的 meta 快照都从这里读，避免各记各的。
+
+    定为 8 的依据是**逐跳召回**（`evals/eval_hop.py`）：4→8 是 **+0.019 [+0.004,+0.037] ✅**，
+    而 8→16 只 +0.011 却让上下文翻倍。⚠️ 旧默认是 32 —— 而全部实验跑的都是命令行显式传的 8，
+    所以「代码默认」和「实验结论」曾经对不上，clone 下来直接跑拿到的是没被验证过的配置。"""
+    return int(os.environ.get("RAG_TOPK", 8))
+
 # 明确的「查无」哨兵：引导模型换关键词重试，或在试过几个角度后如实告知库里没有答案。
 _NO_RESULTS = (
     "NO_RESULTS: nothing in the knowledge base matched this query. "
@@ -28,17 +37,21 @@ _NO_RESULTS = (
 )
 
 
+def format_hits(hits) -> str:
+    """检索结果 → 喂给模型的文本。**planner 臂与 react 臂共用同一套格式** ——
+    否则两臂的 `contexts` 形状不同，评测端按 `[source: ` 切片段的统计会不可比。"""
+    return "\n\n".join(
+        f"[source: {h.doc.source}] (score={h.score:.0f})\n{h.doc.text}" for h in hits
+    ) or _NO_RESULTS
+
+
 def make_rag_search(retriever: Retriever) -> StructuredTool:
     """把一个 retriever 绑成 `rag_search` LangChain 工具。"""
 
     def rag_search(query: str) -> str:
-        hits = retriever.search(query, k=_TOPK)
-        if not hits:
-            return _NO_RESULTS
-        return "\n\n".join(
-            f"[source: {h.doc.source}] (score={h.score:.0f})\n{h.doc.text}"
-            for h in hits
-        )
+        # ⚠️ 每次调用都重读 RAG_TOPK，**不能**在 import 时固化 —— run_matrix.py 的
+        # 各臂是在同一个进程里依次设 env 的，固化的话 topk= 那个臂参数会**静默失效**。
+        return format_hits(retriever.search(query, k=topk()))
 
     return StructuredTool.from_function(
         rag_search,
