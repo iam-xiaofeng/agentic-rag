@@ -41,6 +41,68 @@ _SRCTAG = re.compile(r"\[source:[^\]]*\]")
 _UNSUP = re.compile(r"^\**\s*unsupported\s*[:：]", re.I)   # prompts.py v3 的 escape hatch
 _JSON = re.compile(r"[\[{].*[\]}]", re.S)
 
+# 「拒答」的判据 —— **全项目唯一一份**，确定性、不经过裁判。
+#
+# ⚠️ 这里曾经是两份：eval_agentic.py 一份、eval_judge.py 一份，词表不同。
+# 后果是同一批答案在两个脚本里得到互相矛盾的拒答率 —— 而且恰好在**最需要它的地方**炸：
+# MultiHop-RAG 的 null_query（题目本身不可答，**拒答才是正确行为**）上，模型答的是
+# "I could not determine …"，只有其中一份词表收了 "could not determine"，
+# 于是一个脚本报"30 题全部正确拒答"、另一个报"一次都没拒答"。
+# **同一个概念只准有一处定义**；要加措辞就加在这里。
+#
+# ⚠️ 关键词法有两个**实测踩过的坑**，别再踩：
+#   ① 弯引号：模型写的是 "couldn’t"（U+2019），匹配不上 "couldn't"，更匹配不上 "could not"。
+#      → `_norm_ans()` 先把 ’ 归一成 '，再把 "n't" 展开成 " not"。
+#   ② 词表永远漏：实测还漏过 "could not verify" / "could not find" / "could not reliably identify"。
+#      **所以这个信号只用于确定性诊断，不作为唯一判据**——真正要下结论的地方看三分类。
+_APOS = str.maketrans({"’": "'", "‘": "'"})
+
+REFUSAL: tuple[str, ...] = (
+    "not in passages", "i do not know", "i don't know",
+    "could not determine", "could not find", "could not identify", "could not verify",
+    "could not reliably", "cannot determine", "can not determine", "cannot find",
+    "insufficient information", "not enough information", "unable to determine",
+    "unable to find", "unable to verify", "no information", "no relevant",
+    "无法确定", "无法回答", "没有找到", "未能找到", "无法从", "不确定",
+)
+
+# 「给了候选答案，但自己明确标注证据不支持」—— 这是**第三种行为**，既不是拒答也不是编造。
+# 二值的 refused 把它和「睁眼编」归成一类，会把一个诚实的行为记成失败。
+HEDGE: tuple[str, ...] = (
+    "tentative", "not verify", "does not verify", "do not verify", "not fully support",
+    "does not support", "do not support", "not directly verify", "was not found",
+    "does not state", "not established", "but the retrieved", "likely",
+    "无法核实", "未能证实", "证据不足",
+)
+
+
+def _norm_ans(answer: str | None) -> str:
+    return (answer or "").translate(_APOS).replace("n't", " not").strip().lower()
+
+
+def refused(answer: str | None) -> bool:
+    """答案是否是一次**拒答**（不给候选）。空答案也算——它给不出任何断言。"""
+    a = _norm_ans(answer)
+    return (not a) or any(x in a for x in REFUSAL)
+
+
+def hedged(answer: str | None) -> bool:
+    """给了候选，但**自己声明证据不支持**。⚠️ 只在 `refused()` 为假时才有意义。"""
+    a = _norm_ans(answer)
+    return bool(a) and any(x in a for x in HEDGE)
+
+
+def answer_stance(answer: str | None) -> str:
+    """三分类：`refused`（不给候选）/ `hedged`（给候选但自曝无依据）/ `asserted`（无免责断言）。
+
+    **在不可答题（null_query）上，只有 `asserted` 才是失败。**`hedged` 是诚实的行为：
+    它把不确定性显式交给了用户。实测 30 道不可答题上 asserted = 0。
+    """
+    if refused(answer):
+        return "refused"
+    return "hedged" if hedged(answer) else "asserted"
+
+
 
 def split_answer(raw: str) -> tuple[str, list[str], int]:
     """把 agent 的输出切成（答案, 引的证据句, 它自认没找到依据的环数）。
@@ -94,6 +156,13 @@ class ReactRunner:
         msgs = (state or {}).get("messages", [])
         contexts = [m.content or "" for m in msgs
                     if getattr(m, "type", "") == "tool" and getattr(m, "name", None) == "rag_search"]
+        # agent **实际发出的检索 query** —— 只有这个能看出它有没有真的在多跳：
+        # 若第 2 次查询里出现了第 1 次才拿到的桥接实体，那才是真的跳了一步。
+        # 从 tool_calls 取而不是从 tool 返回取，理由同上：同一轮的并行调用不能漏。
+        queries = [(c.get("args") or {}).get("query", "")
+                   for m in msgs if getattr(m, "type", "") == "ai"
+                   for c in (getattr(m, "tool_calls", None) or [])
+                   if (c.get("name") or "") == "rag_search"]
         answer = ""
         for m in msgs:
             if getattr(m, "type", "") == "ai" and (m.content or "").strip() and not getattr(m, "tool_calls", None):
@@ -106,6 +175,7 @@ class ReactRunner:
             got |= set(_SRC.findall(c))
         return {"answer": answer, "cited": cited, "n_unsupported": unsup,
                 "sources": sorted(got), "contexts": contexts, "n_search": len(contexts),
+                "queries": queries,
                 "n_llm_calls": sum(1 for m in msgs if getattr(m, "type", "") == "ai"),
                 "plan": None}
 
@@ -217,6 +287,7 @@ class PlannerRunner:
             got_src |= set(_SRC.findall(c))
         return {"answer": answer, "cited": cited, "n_unsupported": unsup,
                 "sources": sorted(got_src), "contexts": contexts, "n_search": len(contexts),
+                "queries": [c["query"] for c in chain],      # 与 react 同名，报表/展示可共用一条路径
                 "n_llm_calls": calls, "plan": chain,
                 # 成本/行为项：跨段推了几环。它涨而 correct 不涨 = 推错了；两个一起涨才是买到了东西。
                 "n_inferred": sum(1 for c in chain if c.get("basis") == "inferred")}
