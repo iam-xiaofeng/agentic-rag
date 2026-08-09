@@ -114,10 +114,15 @@ Reply with ONLY a JSON object, no prose and no code fence:
 
 
 def _gold(benchmark: str) -> dict[str, dict]:
-    """{问句: {answer, evidence_list:[{fact}]}}。两个评测集拍成同一形状，裁判 prompt 不用改。"""
-    if benchmark == "musique":
+    """{问句: {answer, evidence_list:[{fact}]}}。两个评测集拍成同一形状，裁判 prompt 不用改。
+
+    ⚠️ benchmark 名要与 `eval_agentic.load_benchmark` **保持同一套**（含 `musique+1hop`）——
+    这里曾经只认 `"musique"`，于是 `musique+1hop` 的 dump 一条都对不上 gold，
+    直接报"没有可判的记录"。新增评测集时**两处都要改**。
+    """
+    if benchmark.startswith("musique"):
         from rag.corpus_musique import load_questions
-        ex, _ = load_questions()
+        ex, _ = load_questions(with_1hop=benchmark.endswith("+1hop"))
         return {e.inputs["question"]: {"answer": e.outputs["reference"],
                                        "evidence_list": [{"fact": f} for f in
                                                          e.outputs["reference_contexts"]]}
@@ -237,16 +242,12 @@ _MEAN = lambda xs: (sum(xs) / len(xs)) if xs else float("nan")            # noqa
 _OK = lambda xs: [x for x in xs if x == x and x is not None]              # noqa: E731
 
 
-# 「给出了具体答案」的判据：确定性、不经过裁判。拒答话术两种语言都要覆盖。
-_REFUSAL = ("not in passages", "i do not know", "i don't know", "could not determine",
-            "could not find", "cannot determine", "insufficient information",
-            "unable to determine", "no information",
-            "无法确定", "无法回答", "没有找到", "未能找到", "无法从", "不确定")
+# 「给出了具体答案」的判据：确定性、不经过裁判。**词表定义在 rag/agent.py，全项目唯一一份。**
+from rag.agent import refused as _is_refusal
 
 
 def answered(r: dict) -> bool:
-    a = (r.get("answer") or "").strip()
-    return bool(a) and not any(w in a.lower() for w in _REFUSAL)
+    return not _is_refusal(r.get("answer"))
 
 
 def _col(recs, key):

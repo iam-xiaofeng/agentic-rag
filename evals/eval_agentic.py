@@ -42,15 +42,13 @@ import time
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 
-from rag.agent import build_runner
+from rag.agent import build_runner, refused as _refused
 from rag.llm import build_model
 from rag.retriever_decompose import maybe_wrap
 from rag.retriever_hybrid import HybridRetriever
 from rag.runctx import DumpWriter, fmt_meta, read_dump, resume_ids, snapshot
 
 DATA = pathlib.Path(__file__).resolve().parents[1] / "data"
-REFUSAL = ("insufficient information", "cannot determine", "not enough information",
-           "无法确定", "没有找到", "未能找到", "无法回答")
 
 # 工具返回里每个片段都以 "[source: ...]" 开头（见 tools.py），据此切回单个片段。
 _CHUNK = re.compile(r"(?=\[source: )")
@@ -83,10 +81,14 @@ class _Ex:
 
 
 def load_benchmark(benchmark: str):
-    """→ (examples, {question: type}, corpus)。**唯一**一处知道两个评测集差别的地方。"""
-    if benchmark == "musique":
+    """→ (examples, {question: type}, corpus)。**唯一**一处知道两个评测集差别的地方。
+
+    `musique+1hop` 在 MuSiQue 之上额外挂由每题第 1 步派生的**单跳**题：同语料、同检索器、
+    同确定性口径，给 2/3/4hop 补一个**难度轴的下端锚点**（见 corpus_musique._one_hop）。
+    """
+    if benchmark.startswith("musique"):
         from rag.corpus_musique import load_corpus, load_questions
-        ex, qtype = load_questions()
+        ex, qtype = load_questions(with_1hop=benchmark.endswith("+1hop"))
         return ex, qtype, load_corpus()
     from rag.corpus_multihop import load_corpus
     raw = json.loads((DATA / "MultiHopRAG.json").read_text(encoding="utf-8"))
@@ -189,7 +191,7 @@ def score_row(ex, qtype: dict, out: dict) -> dict:
         # 初版漏了这一行，于是 n_inferred 恒为 0，差点被我读成"中间档一次没被用上"
         # （真值 11/252 步，从 plan 字段才挖出来）。指标缺一行 = 一个不存在的结论。
         "n_inferred": out.get("n_inferred"),
-        "refused": 1.0 if any(c in (out["answer"] or "").lower() for c in REFUSAL) else 0.0,
+        "refused": 1.0 if _refused(out["answer"]) else 0.0,
         "answer_len": len(out["answer"] or ""), "answer": out["answer"],
         "cited": cited, "n_cited": len(cited), "n_unsupported": out["n_unsupported"],
         # 守卫：引用是 agent 的**自述**，不核对的话「没检索到」和「检索到了但没引」分不开。
@@ -198,6 +200,9 @@ def score_row(ex, qtype: dict, out: dict) -> dict:
         # 不存就只能另起炉灶重检一次，那量到的是检索栈、不是这个 agent 的检索。
         "contexts": out["contexts"],
         "plan": out.get("plan"),
+        # agent 实际发出的检索 query。存下来才能事后看「它到底跳没跳」——
+        # 真多跳的标志是第 2 次 query 里出现了第 1 次才拿到的桥接实体。
+        "queries": out.get("queries"),
     }
 
 
@@ -340,7 +345,7 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="跑 agentic RAG + 确定性指标，逐题落盘")
     ap.add_argument("--out", "--local", dest="out", required=True, metavar="OUT.jsonl",
                     help="逐题 JSONL 输出（第 1 行是 __meta__ 配置快照）。这是 eval_judge.py 的输入")
-    ap.add_argument("--benchmark", choices=["musique", "multihoprag"], default="musique",
+    ap.add_argument("--benchmark", choices=["musique", "musique+1hop", "multihoprag"], default="musique",
                     help="默认 musique —— **MultiHop-RAG 已被实验25 证伪**（捷径率 99.3%%，测的是跨文档聚合不是多跳）")
     ap.add_argument("--per-type", type=int, default=30,
                     help="每种题型抽几题（默认 30 = 90 题）。n=21 时区间宽 ±0.2，追 0.05 的效应等于白跑")
@@ -365,6 +370,7 @@ def main() -> None:
         return report(rows, meta, args.diag)
 
     default_types = {"musique": ["2hop", "3hop", "4hop"],
+                     "musique+1hop": ["1hop", "2hop", "3hop", "4hop"],
                      "multihoprag": ["comparison_query", "inference_query", "temporal_query", "null_query"]}
     types = [t.strip() for t in args.types.split(",") if t.strip()] or default_types[args.benchmark]
 
