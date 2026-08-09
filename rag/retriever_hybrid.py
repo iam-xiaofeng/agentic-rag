@@ -23,9 +23,16 @@ from rag.retriever_bm25 import BM25Retriever
 from rag.retriever_dense import DenseRetriever
 
 _RERANKER = "BAAI/bge-reranker-v2-m3"
-# 池的**信息量**要与 chunk 匹配：pool×chunk ≈ 恒定（实验19 ⑥）。chunk=600 下 100→200 有收益、
-# 200→300 只涨池覆盖不涨交付。可用 RAG_POOL 在 shell 层覆盖，用于新旧配置整体 A/B。
-_POOL = int(os.environ.get("RAG_POOL", 200))
+# **pool = 进 cross-encoder 之前的候选数**（这 pool 条要逐对过一遍 reranker，算力与它成正比）。
+#
+# 定为 50 的依据是**逐跳召回**（`evals/eval_hop.py`，900 次单跳检索）：给定该跳理想的 query，
+# 它那一段进 top-k 的比例 —— pool 25/50/100/200 分别是 0.941/0.941/0.933/0.930（k=8）。
+# **池内覆盖一路涨（0.956→0.985）而召回反而跌**：多进池的候选 reranker 排不上来，还挤掉真证据。
+# pool=200 花 4.9 倍算力，换来的是**负的点估计**。
+#
+# ⚠️ 旧值是 200，来自实验19⑥ —— 那次是在 `reranker=None` 下量的**池覆盖**，
+# 根本没量交付。**没有成本项的上游代理量单调随 pool 上升，永远支持「再开大一点」。**
+_POOL = int(os.environ.get("RAG_POOL", 50))
 
 
 def _minmax(x: np.ndarray) -> np.ndarray:

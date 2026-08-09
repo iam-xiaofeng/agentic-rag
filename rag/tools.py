@@ -22,8 +22,12 @@ _TOPK = int(os.environ.get("RAG_TOPK", 32))
 
 
 def topk() -> int:
-    """当前生效的 k。planner 臂与 runctx 的 meta 快照都从这里读，避免各记各的。"""
-    return int(os.environ.get("RAG_TOPK", 32))
+    """当前生效的 k（交付给模型的片段数）。planner 臂与 runctx 的 meta 快照都从这里读，避免各记各的。
+
+    定为 8 的依据是**逐跳召回**（`evals/eval_hop.py`）：4→8 是 **+0.019 [+0.004,+0.037] ✅**，
+    而 8→16 只 +0.011 却让上下文翻倍。⚠️ 旧默认是 32 —— 而全部实验跑的都是命令行显式传的 8，
+    所以「代码默认」和「实验结论」曾经对不上，clone 下来直接跑拿到的是没被验证过的配置。"""
+    return int(os.environ.get("RAG_TOPK", 8))
 
 # 明确的「查无」哨兵：引导模型换关键词重试，或在试过几个角度后如实告知库里没有答案。
 _NO_RESULTS = (
