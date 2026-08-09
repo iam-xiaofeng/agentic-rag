@@ -64,6 +64,7 @@ def snapshot(**extra) -> dict:
     from rag.llm import resolve
     from rag.retriever_dense import _MODEL as DENSE_MODEL
     from rag.retriever_hybrid import _POOL, _RERANKER
+    from rag.tools import topk
 
     def role(r):
         try:
@@ -79,7 +80,12 @@ def snapshot(**extra) -> dict:
         "agent": os.environ.get("RAG_AGENT", "react"),
         **prompt_fingerprint(),
         "retrieval": {
-            "topk": int(os.environ.get("RAG_TOPK", 32)),
+            # ⚠️ **必须调 topk() / 读 _POOL，不许在这里重写一遍默认值。**
+            # 这里曾经写死 `os.environ.get("RAG_TOPK", 32)`，而 tools.topk() 的默认已改成 8 ——
+            # 于是实际用 k=8 跑的 run，`__meta__` 里记的是 k=32。
+            # **污染溯源信息比普通 bug 更坏**：它让"这个 dump 是什么配置跑的"这件事本身不可信，
+            # 而整个配对比较装置都建立在它之上。同一个默认值只准有一处定义。
+            "topk": topk(),
             "pool": _POOL,
             "chunk_size": int(os.environ.get("RAG_CHUNK_SIZE", 600)),
             "chunk_overlap": int(os.environ.get("RAG_CHUNK_OVERLAP", 150)),
