@@ -46,9 +46,13 @@ def main() -> None:
 
     out = run(question)
 
+    qs = out.get("queries") or []
     for i, ctx in enumerate(out["contexts"], start=1):
         srcs = [ln for ln in ctx.splitlines() if ln.startswith("[source:")][:4]
-        print(f"\n  ↳ 检索 #{i} → {len(ctx)} 字符，前几个 source：")
+        q = qs[i - 1] if i <= len(qs) else None
+        # 打印 agent **实际发出的 query**：真多跳的标志是第 2 次查询里出现了
+        # 第 1 次才拿到的桥接实体。没有这一行，"它到底跳没跳"是看不出来的。
+        print(f"\n  ↳ 检索 #{i}" + (f"  query={q!r}" if q else "") + f"  → {len(ctx)} 字符，前几个 source：")
         for s in srcs:
             print(f"      {s[:100]}")
     if out.get("plan"):
