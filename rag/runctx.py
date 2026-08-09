@@ -101,6 +101,7 @@ def snapshot(**extra) -> dict:
 # 分两级：FATAL 不同 = 比的不是同一件事，拒绝出结论；VARIED 不同 = 那就是本次实验的自变量，打印出来。
 _FATAL = ("benchmark", "judge_model")
 _VARIED = ("answer_model", "agent", "prompt_sha", "planner_prompt_sha", "oracle",
+           "benchmark",                       # 名字不同但语料相同时，降级为「自变量」打印出来
            "retrieval.topk", "retrieval.pool", "retrieval.chunk_size", "retrieval.decompose")
 
 
@@ -110,9 +111,32 @@ def _get(d: dict, path: str):
     return d
 
 
+def _corpus_of(bench) -> str | None:
+    """把 benchmark 名归一到**决定可比性的东西**：语料 + gold 来源。
+
+    `musique` 与 `musique+1hop` 用**同一份 21100 段语料、同一个 gold 字段**，
+    后者只是额外挂了由第 1 步派生的单跳题（题目集合是超集，按 example_id 配对时
+    多出来的那些自然匹配不上）。**拿它们配对是合法的**，所以致命判据比对的应当是
+    「语料是谁」而不是「benchmark 叫什么」。
+
+    ⚠️ 这不是在放宽守卫：`musique` vs `multihoprag` 仍然致命。
+    降级掉的那一档会作为**自变量**打印出来，读的人看得见。
+    """
+    return bench.split("+")[0] if isinstance(bench, str) else bench
+
+
 def compare_meta(a: dict, b: dict) -> tuple[list[str], list[str]]:
-    """→ (致命差异, 自变量差异)。给 `eval_judge.py --baseline` 在配对前自动体检用。"""
-    fatal = [f"{k}: {_get(a, k)!r} vs {_get(b, k)!r}" for k in _FATAL if _get(a, k) != _get(b, k)]
+    """→ (致命差异, 自变量差异)。给 `eval_judge.py --baseline` 在配对前自动体检用。
+
+    `benchmark` 走 `_corpus_of()` 归一后再比：名字不同但语料相同（musique / musique+1hop）
+    不算致命，会落到 varied 里被打印出来；语料真不同（musique vs multihoprag）仍然致命。
+    """
+    norm = {"benchmark": _corpus_of}
+    def val(d, k):                                      # noqa: E306
+        v = _get(d, k)
+        return norm[k](v) if k in norm else v
+    fatal = [f"{k}: {_get(a, k)!r} vs {_get(b, k)!r}"
+             for k in _FATAL if val(a, k) != val(b, k)]
     varied = [f"{k}: {_get(b, k)!r} → {_get(a, k)!r}" for k in _VARIED if _get(a, k) != _get(b, k)]
     return fatal, varied
 

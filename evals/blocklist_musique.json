@@ -711,5 +711,15 @@
    "multi_answer": true,
    "consensus": false
   }
- }
+ },
+ "gold_not_stated": {
+  "2hop__191125_781346": "gold 只说某沼泽位于 Central 与 Eastern Equatoria 之间，未陈述两州接壤",
+  "2hop__278022_71701": "问 what year，gold 是 'November 5'（日期不是年份）",
+  "2hop__61664_786853": "gold 只说 Amy Poehler 与 Will Arnett 合演过一部电影，未陈述婚姻关系",
+  "2hop__68322_510545": "gold 只说 Jennifer Connelly 演过《美丽心灵》，未陈述与 Paul Bettany 的婚姻关系",
+  "4hop1__436202_765799_282674_759393": "gold 靠学区跨县间接暗示邻接，未明文陈述 Outagamie 与 Brown 接壤、也未说 Green Bay 是县治",
+  "4hop1__9007_698949_157828_239539": "gold 只说 Pristina 的媒体报道过选举，未陈述国家广播公司总部所在地",
+  "4hop1__726152_153080_33897_81096": "gold 给的是 Tucson 而非最大城市 Phoenix，且无任何段落写了 Indy 冠军是谁"
+ },
+ "_gold_not_stated_note": "2026-08-09 人工逐条核对 gold 支撑段原文。判据：**gold 段未陈述问句所问的那条关系**（含答案实体不等于陈述了关系）。这类题上「答对」与「有依据」互斥——忠实的 agent 必然拒答却被 correct 记 0。来源：final_musique 里「证据全部交付却仍拒答」的 8 题，逐条核后 7 题属实、1 题（2hop__46065_417697）是 agent 表述问题（答案里已含 gold），**不计入**。"
 }

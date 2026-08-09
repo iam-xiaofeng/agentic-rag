@@ -60,7 +60,8 @@ _APOS = str.maketrans({"’": "'", "‘": "'"})
 REFUSAL: tuple[str, ...] = (
     "not in passages", "i do not know", "i don't know",
     "could not determine", "could not find", "could not identify", "could not verify",
-    "could not reliably", "cannot determine", "can not determine", "cannot find",
+    "could not establish", "could not reliably", "cannot determine", "can not determine",
+    "cannot find",
     "insufficient information", "not enough information", "unable to determine",
     "unable to find", "unable to verify", "no information", "no relevant",
     "无法确定", "无法回答", "没有找到", "未能找到", "无法从", "不确定",
@@ -70,7 +71,8 @@ REFUSAL: tuple[str, ...] = (
 # 二值的 refused 把它和「睁眼编」归成一类，会把一个诚实的行为记成失败。
 HEDGE: tuple[str, ...] = (
     "tentative", "not verify", "does not verify", "do not verify", "not fully support",
-    "does not support", "do not support", "not directly verify", "was not found",
+    "does not support", "do not support", "not directly verify", "not directly supported",
+    "not supported", "was not found",
     "does not state", "not established", "but the retrieved", "likely",
     "无法核实", "未能证实", "证据不足",
 )
@@ -96,7 +98,12 @@ def answer_stance(answer: str | None) -> str:
     """三分类：`refused`（不给候选）/ `hedged`（给候选但自曝无依据）/ `asserted`（无免责断言）。
 
     **在不可答题（null_query）上，只有 `asserted` 才是失败。**`hedged` 是诚实的行为：
-    它把不确定性显式交给了用户。实测 30 道不可答题上 asserted = 0。
+    它把不确定性显式交给了用户。
+
+    ⚠️ **这仍然是关键词法，它永远会漏。** 已经补过三轮词表（弯引号 → could not verify →
+    could not establish / not directly supported），每一轮都是被真实输出打脸补的。
+    ⇒ **凡是拿它下结论，必须同时报人工核验数。** 本项目手工逐条核过 60 道不可答题的回答，
+    自动判定的 asserted 全部是**漏词**，人工核验的真实 asserted = **0/60**。
     """
     if refused(answer):
         return "refused"
