@@ -1,381 +1,436 @@
-# 混合检索 RAG 流水线 · BM25 + bge 向量 + 交叉编码重排 · LLM-as-judge 评测
+# 混合检索 RAG · agentic 多跳 · **可证伪的评测**
 
-> 一个**面试可讲、可跑、可评测**的生产级 RAG **检索流水线**：
-> **召回**（BM25 词法 + bge 稠密向量[Chroma]，RRF 融合）→ **重排**（bge-reranker 交叉编码）→ **生成**（grounded、带引用）
-> → **评测**（openevals 的 LLM-as-judge，可一键推 LangSmith）。
+> 一条生产级 RAG 检索栈 + 两条 agentic 控制流 + 一套**尺子先自证中立**的评测装置。
 >
-> 重点是**检索质量**：单一检索方式都有盲区，词法看词面、向量看语义，**混合 + 重排**是业界最扎实的组合。
-> 检索后端全部藏在一个 `Retriever` 协议后面、**可替换**，换后端时上层（生成 / 评测）一行不动。
-
-> **两条路并存**：`master` 上既有**单次强检索流水线**（`run.py` / `evals/eval_rag.py`），也保留了 **agentic RAG**
-> （`run_agentic.py`：模型自己决定该不该查 / 查几次 / 何时停）——两者共用同一套 `Retriever` 协议，是正交、互补的做法。
-> 最初的「agentic vs 单次」对比实验另冻结在 tag **`v1-agentic-comparison`**（`git checkout` 可复现）。
-
----
-
-## 一、为什么这么设计（核心动机）
-
-RAG = **检索(retrieve) → 拼上下文(augment) → 生成(generate)**。**答案质量的上限，几乎全由检索决定**——
-检索不到，再强的模型也只能幻觉。所以本项目把功夫下在检索侧，用业界公认最稳的三段式：
-
-1. 🔤 **词法召回（BM25）**——看**词面重叠**。命中精确实体 / 稀有词很强，但换个说法就抓瞎。
-2. 🧠 **向量召回（bge dense）**——看**语义相近**。措辞不同也能召回，但对精确实体 / 数字不敏感。
-3. 🎯 **交叉编码重排（bge-reranker）**——把 (query, passage) **一起**读，算一个比双塔向量更准的相关性分。贵，所以只重排少量候选。
-
-> **为什么两路召回要融合、还要重排**：词法和向量的盲区**互补**——RRF 融合先把两种「看法」的候选按排名并起来（提召回），
-> 再用 cross-encoder 精排（提精度）。这就是 “hybrid retrieval + reranking” 成为生产标配的原因。
-
-检索后端解耦在 `Retriever` 协议后面：当前实现 `BM25Retriever` / `DenseRetriever` / `HybridRetriever` 三个后端，
-**同一套接口**，`rag/pipeline.py`（生成）和 `evals/eval_rag.py`（评测）对换后端无感。
+> **召回**（BM25 + bge 稠密向量，RRF 融合）→ **重排**（bge-reranker 交叉编码）
+> → **多跳**（react 自主循环 / planner 显式链条）→ **评测**（三个头号量，各有各的参照系）。
+>
+> 重点不在"分更高"，在**每个数字都知道自己是怎么来的、能不能被推翻**。
+> 全部实验的设置 / 命令 / 原始数据 / 被推翻的条目在 **[EXPERIMENTS.md](EXPERIMENTS.md)**。
 
 ---
 
-## 二、目录结构（每个文件干什么）
+## 一、结果
+
+`gpt-5.6-luna` / react / **pool=50 / k=8**，8 种题型、同一套系统、同一个裁判。
+
+### 1.1 按题型（MuSiQue 是真桥接多跳，MultiHop-RAG 已被本项目探针证伪，见 §3.2）
+
+| 题型 | 语料 | n | **correct** | grounded | delivered† | n_search | 万字符 |
+|---|---|---:|---:|---:|---:|---:|---:|
+| **1hop** | MuSiQue | 30 | **0.933** | 0.933 | 1.000 | **1.33** | **0.74** |
+| 2hop | MuSiQue | 30 | 0.667 | 0.883 | 0.917 | 3.17 | 1.64 |
+| 3hop | MuSiQue | 30 | 0.767 | 0.739 | 0.944 | 4.07 | 2.34 |
+| **4hop** | MuSiQue | 30 | **0.633** | 0.757 | 0.833 | **5.77** | **3.07** |
+| inference | MultiHop-RAG | 30 | 0.967 | 0.960 | 0.719 | 3.83 | 1.93 |
+| comparison | MultiHop-RAG | 30 | 0.900 | 0.867 | 0.917 | 3.23 | 1.66 |
+| temporal | MultiHop-RAG | 30 | 0.800 | 0.950 | 0.639 | 4.70 | 2.49 |
+| **null**（不可答） | MultiHop-RAG | 30 | 见 1.3 | — | — | **6.60** | **3.42** |
+
+† `delivered` = gold 证据段里检索**实际给到**的比例，**确定性、零裁判噪声**。
+
+> **同一套系统在两个数据集上差 0.2–0.3。** MultiHop-RAG 的"多跳"题得 0.80–0.97，
+> MuSiQue 的 2/3/4hop 只有 0.63–0.77 —— 因为前者 99.3% 的题**光靠原问句就能够到含答案那篇**。
+> ⇒ **"我的 RAG 准确率 0.89" 取决于在哪个集上测，不取决于系统。报数必须连评测集的探针结果一起报。**
+
+### 1.2 MuSiQue 多跳的主口径
+
+| 口径 | n | **correct** | grounded |
+|---|---:|---:|---:|
+| 2/3/4hop 全部题 | 90 | 0.689 | 0.844 |
+| 剔除双审计员一致判坏的题 | 74 | 0.811 | 0.892 |
+| **剔除坏题 + gold 未陈述关系的题** ← **主口径** | 71 | **0.831** | 0.887 |
+| 同上，1–4hop 全档 | 101 | 0.861 | 0.901 |
+| （激进口径：剔任一审计员判坏的题） | 55 | 0.909 | 0.927 |
+
+**0.689 这个数是怎么被三件事压低的**（拆解见 §5.3）：
 
 ```
-agentic-rag/
-├── README.md            # 本文件
-├── EXPERIMENTS.md       # 28 次实验的设置 / 命令 / 数据 / 结论（含被后续实验推翻的条目，原文保留 + 订正标注）
-├── requirements.txt     # 依赖：sentence-transformers / chromadb / rank-bm25 / openevals / langchain-openai / langgraph / langsmith
-├── .env.example         # 配置模板（复制成 .env 填真实值）
-├── .env                 # 真实密钥（已 gitignore；模型 + LangSmith 凭据）
-├── run.py               # CLI：对一个问题跑 hybrid 检索（可选生成），打印排名
-├── run_agentic.py       # CLI：跑 agentic 检索，逐步打印每次改写 / 停
-│
-├── rag/                 # ★ 核心：检索栈 + agent。**只被依赖，不依赖 evals/**
-│   │  ── 检索：一个协议 + 三个后端 ──
-│   ├── retriever.py         # Retriever 协议 + Doc/Hit 数据类（后端地基）
-│   ├── retriever_bm25.py    # BM25Retriever：词法检索（rank_bm25，零重依赖）
-│   ├── retriever_dense.py   # DenseRetriever：bge 编码 → Chroma 持久化向量库（.cache/chroma/）
-│   ├── retriever_hybrid.py  # HybridRetriever：BM25+向量 RRF 融合 → bge-reranker 重排（★ 主力）
-│   ├── retriever_decompose.py  # 查询分解 → 逐子问句各自重排 → 轮流取名额（RAG_DECOMPOSE=1）
-│   ├── reranker_qwen.py     # Qwen3-Reranker-4B（instruction-aware，评测/对照用，非默认）
-│   │  ── 生成 + agentic ──
-│   ├── llm.py               # build_model / build_judge：OpenAI 兼容网关 + .env 自动加载
-│   ├── pipeline.py          # answer：检索 → 一次 grounded 生成（带 [source:] 引用）
-│   ├── prompts.py           # agentic 六条策略（v3；改前先读 EXPERIMENTS 实验27④/28）
-│   ├── tools.py             # rag_search：暴露给模型的唯一工具
-│   ├── agent.py             # create_agent 的 agentic loop
-│   │  ── 语料 ──
-│   ├── corpus_multihop.py   # MultiHop-RAG（609 篇 → 15172 片段 + 2556 问）⚠️ 非真多跳，见第七节①
-│   ├── corpus_musique.py    # MuSiQue（HuggingFace，21100 段 + 2417 问，2/3/4hop）★ 真桥接多跳
-│   └── dataset.py           # Example 数据类（评测样例的共享类型）
-│
-├── evals/               # 评测脚本。每个都能 `python evals/xxx.py` 直接跑
-│   ├── eval_judge.py        # ★ **头号指标**：裁判读 agent 自引的关键句 → correct/sufficient/faithful
-│   ├── eval_agentic.py      # 跑 agent + 确定性指标；--local 落逐题 JSONL（eval_judge 的输入）
-│   ├── eval_benchmark_probe.py  # ★ **判一个"多跳"数据集是不是真多跳**——换数据集前先跑它
-│   ├── eval_answerability.py    # 地板/实测/天花板三条线（跑一次的常数，给 correct 减地板）
-│   ├── eval_rebuild.py      # ★ 逐层重建验收：--layer 0 前置自检 / 1 chunk / 2 融合 / 3 重排（免费）
-│   ├── eval_common.py       # 评测公共件（openevals 装配 + 确定性评估器）——库，无 CLI
-│   ├── eval_rag.py          # 单次流水线的 openevals 评测，可 --upload 推 LangSmith
-│   ├── eval_query.py / eval_chain.py / eval_diag.py / eval_ablation.py / eval_rerank_effect.py
-│   ├── eval_rescore.py      # 用新裁判把存档 run 统一重打分（裁判下线时保旧实验可比）
-│   └── langsmith_upload.py  # 把全量 MultiHop-RAG（含 gold 证据）传成 LangSmith 数据集
-│
-├── data/                # ← MultiHop-RAG 语料（已 gitignore；见「第三节」）
-│   ├── corpus.json          # 609 篇新闻全文
-│   └── MultiHopRAG.json     # 2556 个多跳问题 + gold 证据
-└── runs/                # 后台实验的日志与逐题 dump（已 gitignore）
-    └── dumps/               # eval_agentic.py --local / eval_judge.py 的 JSONL
+坏题          ~0.12   剔 16 题 → 0.689→0.811（双审计员一致，带假阳率校准）
+gold 未陈述关系 ~0.02   逐条核过 gold 原文的 7 题，「答对」与「有依据」在这些题上互斥
+真答错        ~0.13   correct@给了 = 0.77–0.83（它一旦开口，八成是对的）
 ```
 
-> **依赖方向是单向的：`evals/ → rag/`。** 早先 `rag/corpus_multihop.py` 反过来依赖
-> `eval_dataset.py`（核心依赖评测），重组时把那个共享数据类挪成了 `rag/dataset.py`。
+### 1.3 不可答题（null）：**0/30 无免责编造**
 
+| 行为 | n=30 | 判定 |
+|---|---:|---|
+| 明确拒答 | 17 | ✅ 正确 |
+| 给候选但**自曝证据不支持** | 13 | ✅ 诚实（把不确定性交给用户） |
+| **无免责断言** | **0** | ← 唯一的失败模式 |
+
+> 二值的"拒答率"会把那 13 道诚实标注的记成失败，所以本项目用**三分类**（`rag/agent.py:answer_stance`）。
+> ⚠️ 关键词法永远会漏（补过三轮词表），所以**同时报人工核验数**：手工逐条核过 60 道，真实 asserted = **0/60**。
+
+### 1.4 还剩多少空间：**检索已经不是瓶颈**
+
+| | 值 | 含义 |
+|---|---|---|
+| 地板（不给检索，凭参数化知识答） | 0.244 | 不是检索挣来的那部分 |
+| 天花板（**同一套 agent** + gold 证据） | 0.739 | 检索做到完美也就这样 |
+| **★ 检索还能买到**（天花板 − 实测） | **+0.102 [+0.011,+0.193] ✅** | 整个检索方向的**全部**剩余空间 |
+
+⇒ **把证据喂到嘴边总共只值 +0.10，而换一个答题模型在真检索下就买到 +0.148。换模型 > 把检索做到完美。**
+拆到跳数上只有 4hop 显著（**+0.200 ✅**），2hop/3hop 都跨 0。
 
 ---
 
-## 三、`data/` 详解（这里是什么）
+## 二、检索栈：每个参数的取值都有实验撑着
 
-`data/` 放的是 **MultiHop-RAG** —— 一个**多跳 RAG 评测基准**，自带语料 + 问题 + gold 证据。
+**尺子**：**逐跳召回** —— 把 MuSiQue 分解里的 `#N` 换成前跳真答案，得到"这一跳该发的 query"，
+问它那**唯一一段** gold 有没有进 top-k。确定性、零裁判噪声、**与链长无关**。
+900 次单跳检索，同跳配对 bootstrap。（为什么不能用"一次拿全"的口径 → §2.6）
 
-- **来源**：HuggingFace [`yixuantt/MultiHopRAG`](https://huggingface.co/datasets/yixuantt/MultiHopRAG)（论文 *MultiHop-RAG*, 2024）；许可 **ODC-BY**（公开、署名即可）。
-- **为什么选它**：证据被**故意分散在 2~4 篇文章**里 → 对检索的召回是真实压力测试；自带 gold 证据；只有 609 篇，笔记本几分钟建完索引。
-- **两个文件**：
-  - `corpus.json`：609 篇新闻（`title` 标题 / `body` 正文 / `source` 媒体 / …）——**被检索的语料**。
-  - `MultiHopRAG.json`：2556 个问题（`query` / `answer` 标准答案 / `question_type` / `evidence_list` gold 证据）——**评测集**。
-- **我们怎么用**（`rag/corpus_multihop.py`）：
-  - `load_corpus()`：每篇 `body` 用 **递归切分**（`RecursiveCharacterTextSplitter`，优先 `\n\n`→`\n`→句子边界，**600 字符 / 重叠 150**）切块、拼上标题 → **15172 个 `Doc`**（`source = 文章标题`，与 gold 证据标题对齐）。切分参数是整条栈最上游的旋钮，选型过程见 EXPERIMENTS 实验 17-19。
-  - `load_examples()`：每个问题 → 一条 `Example`（`question` / `reference=answer` / `sources=gold 标题` / `kind`）。
+### 2.1 整栈消融：从 BM25 单路一路加到重排，**全程同一把尺**
 
-### 如何重新下载
+| 层 | 逐跳召回@8 | Δ vs 上一层 | ms/跳 |
+|---|---:|---:|---:|
+| ① BM25 单路 | 0.830 | — | 60 |
+| ② dense 单路 | 0.889 | +0.059 | 55 |
+| ③ **RRF 融合** | **0.937** | **+0.048** | 55 |
+| ④ minmax 融合 | 0.941 | +0.004 | 55 |
+| ⑤ ③ + reranker | 0.941 | +0.000 | **1084** |
+
+| 对照 | Δ | 95% CI |
+|---|---:|---|
+| **融合 − BM25 单路** | **+0.107** | **[+0.074,+0.144] ✅** |
+| **融合 − dense 单路** | **+0.048** | **[+0.015,+0.081] ✅** |
+| minmax − RRF | +0.004 | [−0.011,+0.022] 跨0 |
+
+⇒ **融合是这条栈上唯一稳定显著、且几乎免费（+55ms）的收益。融合算法选哪个不重要。**
+
+### 2.2 融合权重：**调了也白调**
+
+| `w_bm25` | 0.00 | 0.25 | **0.50** | 0.75 | 1.00 |
+|---|---|---|---|---|---|
+| 逐跳召回@8 | 0.919 | 0.919 | **0.941** | 0.915 | 0.915 |
+
+五个取值只差 0.026 且不单调。⚠️ 权重扫描平坦时结论**不是**"两条腿等价"，
+而可能是**下游把上游差异抹平了** —— 所以权重要在**关掉重排**时扫才干净。
+
+### 2.3 reranker：**值不值取决于 `k` 有多紧**
+
+| 配置 | 不重排 | 重排 | Δ | 95% CI |
+|---|---:|---:|---:|---|
+| pool=50 **k=4** | 0.856 | 0.926 | **+0.070** | **[+0.033,+0.107] ✅** |
+| pool=50 k=8 | 0.937 | 0.941 | +0.004 | [−0.019,+0.030] 跨0 |
+| pool=200 **k=4** | 0.863 | 0.915 | **+0.052** | **[+0.015,+0.093] ✅** |
+| pool=200 k=8/16 | 0.919/0.944 | 0.930/0.948 | +0.011/+0.004 | 跨0 |
+
+**机制**：RRF 后 gold 通常已在前 8 名内，重排只在前 8 名**内部**换顺序 ——
+k=8 名额够宽、换不换都装得下；k=4 名额紧，排序才决定性。
+
+**所以它不是"要不要"，是一笔可换的账**：同等召回下 **≈1000ms GPU ⇄ 2800 上下文字符**。
+
+| 配置 | 逐跳召回 | GPU ms/跳 | 上下文字符 |
+|---|---:|---:|---:|
+| 无重排 k=8 | 0.937 | **55** | ~5300 |
+| 有重排 k=4 | 0.926 | 1084 | **~2500** |
+| 配对差 | +0.011 **跨0** | 20× | 0.5× |
+
+> 📌 **只在一格上测就外推会翻车**：先只测 k=8 得到"重排白花 20 倍算力"，
+> 补测 k=4 后**被自己推翻**。⇒ **凡是"某组件没用"的结论，必须在该组件最该起作用的条件下复测。**
+
+### 2.4 `pool` 与 `k`：两笔**不同的钱**
+
+| | 是什么 | 花什么 | **定档** | 依据 |
+|---|---|---|---|---|
+| `pool` | 进 cross-encoder **之前**的候选数 | **GPU 算力**（逐对前向） | **50** | pool>50 召回点估计**转负**，200 要 4.9× 算力 |
+| `k` | 交付给模型的片段数 | **上下文 token** + lost-in-the-middle | **8** | 4→8 **+0.019 ✅**；8→16 只 +0.011 却让上下文翻倍 |
+
+| pool | 池内覆盖 | 重排 ms | k=4 | k=8 | k=16 | k=32 |
+|---:|---:|---:|---:|---:|---:|---:|
+| 25 | 0.956 | **642** | 0.922 | 0.941 | 0.956 | 0.956 |
+| **50** ← 定档 | 0.967 | 1095 | 0.926 | **0.941** | 0.952 | 0.963 |
+| 100 | 0.978 | 1781 | 0.915 | 0.933 | 0.948 | 0.959 |
+| 200 | 0.985 | 3121 | 0.915 | 0.930 | 0.948 | 0.952 |
+
+![pool × k 逐跳召回](docs/hop_recall_grid.png)
+
+⚠️ **旧默认是 `pool=200 / k=32`，两个都被上面的实验推翻。** 旧值 200 来自一次
+**在 `reranker=None` 下量池覆盖**的实验 —— 只问"证据进没进池子"、没问"交付没交付"。
+**没有成本项的上游代理量单调随 pool 上升，永远支持「再开大一点」。**
+
+### 2.5 切块：**默认评测集根本不切块**
+
+| 语料 | 切块 | 方式 | 依据 |
+|---|---|---|---|
+| **MuSiQue（默认）** | **不切** | — | 维基段落本身就是自然检索单元 |
+| MultiHop-RAG | 600 / overlap 150 | **递归**（`RecursiveCharacterTextSplitter`，尊重 `\n\n`→句子→词的边界） | 1200→600 让 dense 单点自查 **56%→73%** |
+
+- **chunk 越大** → 句子级语义被稀释（dense 自查 top1 从 300 字的 79% 掉到 1200 字的 45%）；
+- **chunk 越小** → 证据句被切断，这是**发生在检索之前、不可恢复**的损失；
+- **递归 vs 定长**：0.653 vs 0.645，**中性** —— 递归的价值在可读性，不在召回。
+
+⚠️ 所以 `.env` 里的 `RAG_CHUNK_SIZE` / `RAG_CHUNK_OVERLAP` **对默认配置不生效**。
+**参数写在配置里 ≠ 它在起作用。**
+
+### 2.6 ★ 为什么尺子必须是「逐跳」的
+
+直觉的量法是「用原问句查一次，gold 的 N 段能捞回几段」。**对多跳题这是错的靶子** ——
+多跳题的构造就是要让"一次拿全"不可能。后果不是"不准"，是**结构性偏向**：
+既然要一次凑齐 N 段，指标必然奖励更大的 k。实测这样量出来的网格给出
+「k=32 比 k=8 高 +0.13、全部显著 ✅」—— **那不是发现，是指标的算术性质。**
+
+换成逐跳口径后还多出一个能直接回答的问题 —— **越往后越难检索吗？不。**
+
+| 跳位 | n | k=4 | k=8 | k=16 |
+|---|---:|---:|---:|---:|
+| 第 1 跳 | 90 | 0.933 | 0.933 | 0.933 |
+| 第 2 跳 | 90 | 0.911 | 0.944 | 0.956 |
+| 第 3 跳 | 60 | 0.917 | 0.933 | 0.950 |
+| **第 4 跳** | 30 | 0.867 | 0.900 | **0.967** |
+
+⇒ **4hop 的 0.633，失败不在"找不到"，在"想不出下一跳该问什么"。**
+
+### 2.7 一句话
+
+**真正花钱买到东西的只有「融合」（+0.107 ✅，几乎免费）。**
+reranker 只在 k 紧时值钱、pool 开大是负收益、融合权重和算法都无所谓、切块在默认集上不生效。
+
+---
+
+## 三、语料与评测集
+
+### 3.1 一条命令拉数据（clone 后即可复现）
 
 ```bash
-cd agentic-rag && mkdir -p data
-curl -sL https://huggingface.co/datasets/yixuantt/MultiHopRAG/resolve/main/corpus.json      -o data/corpus.json
-curl -sL https://huggingface.co/datasets/yixuantt/MultiHopRAG/resolve/main/MultiHopRAG.json -o data/MultiHopRAG.json
-# 离线自检（无需模型）：
-.venv/bin/python -c "from rag.corpus_multihop import load_corpus, load_examples; print(len(load_corpus()), '片段', len(load_examples()), '例')"  # 15172 片段 2556 例
+python scripts/fetch_data.py          # MuSiQue 走 HF 缓存；MultiHop-RAG 下到 data/
 ```
+
+**MuSiQue（默认）**：validation 全部候选段落去重 **21100 段**（**含官方干扰项**——
+只放 gold 等于把检索题变成阅读题）、**2417 题**（2/3/4hop）。
+**1hop** 由每题第 1 步派生（同语料、同检索器、gold 段精确），作难度轴的下端锚点。
+
+### 3.2 换数据集之前先跑探针
+
+`python evals/eval_benchmark_probe.py`，**全确定性、不调 LLM**：
+
+| 数据集 / 子集 | ⚑**捷径率** | 一次拿全 | 最高频答案占比 |
+|---|---|---|---|
+| MultiHop-RAG | **99.3%** | 76.5% | 34.5% |
+| HotpotQA bridge | **96.5%** | 95.7% | 0.4% |
+| MuSiQue 2/3/**4hop** | 79.6 / 81.8 / **69.0%** | 78.6 / 58.3 / **33.3%** | 0.8 / 4.0 / 12.1% |
+
+⚑ 捷径率 = 光靠**原问句**就够到了**含答案那篇** → 中间的跳可以整个跳过。
+**连"名字是 bridge"也不可信。换数据集前先跑探针，别看名字。**
+
+### 3.3 坏题名单（`evals/blocklist_musique.json`，入库可复核）
+
+1. **两个不同网关的模型各审一遍**，都判坏才进 `consensus_bad`(16)，任一判坏进 `any_bad`(33)；
+   "有多个正确答案"单列 `multi_answer`(10) —— 它是**判分口径**问题，不是坏题。
+2. **审计器自己先被校准**：手工核过 9 坏 + 6 好作种子。第一版召回 100% 但**假阳 67%**
+   （把"多答案"当"坏题"），改判据后 → 召回 78% / **假阳 17%**。
+3. **查循环论证**：审题模型 ≠ 被测答题模型。用第三个模型交叉审 → 没有自我抬高。
+4. `gold_not_stated`(7)：**gold 段未陈述问句所问的那条关系**（含答案实体 ≠ 陈述了关系）。
+   逐条核过原文，其中 4 题双审计员也独立判坏 —— 人工与自动一致。
+5. 两审计员 Jaccard 只有 **0.48** ⇒ 判定本身有主观性，所以 §1.2 报**整个口径带**。
 
 ---
 
 ## 四、快速开始
 
 ```bash
-cd agentic-rag
-python -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt        # 含 sentence-transformers（会拉 torch）；首次跑会自动下 bge 模型
-cp .env.example .env                    # 填 OPENAI_API_KEY / OPENAI_BASE_URL / RAG_MODEL / LANGSMITH_*（真 key 放 .env）
+python -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt
+cp endpoints.example.json endpoints.json   # 模型名 → base_url + key
+cp .env.example .env                       # 网关行为 + 检索旋钮
+python scripts/fetch_data.py               # 拉评测集
+python -m rag.llm                          # 逐个 ping 注册表里的模型
 
-# 1) 免费离线自检（不调模型）：语料加载 + 分块
-python -c "from rag.corpus_multihop import load_corpus, load_examples; print(len(load_corpus()), '片段', len(load_examples()), '例')"
+# 看一题的完整多跳过程（evals/demo_set.json 里有 9 道挑好的演示题）
+python run_agentic.py "Who played the girlfriend of Alex P. Keaton's actor on Family Ties in Back to the Future?"
 
-# 2) 跑 hybrid 检索（首次会下 bge 模型 + 编码 15172 片段，之后走 .cache 缓存）
-python run.py "Who is the individual associated with the cryptocurrency industry facing a criminal trial?"
-python run.py --no-gen "..."           # 只看检索排名，不调生成模型
+# 主路径：多臂矩阵 → 判分 → 参照系
+python evals/run_matrix.py --per-type 30 --tag m1_ \
+    --arm base   model=deepseek-v4-pro agent=react \
+    --arm strong model=gpt-5.6-luna    agent=react
+python evals/eval_judge.py runs/dumps/m1_strong.jsonl --baseline runs/dumps/m1_base.jsonl \
+    --out runs/dumps/m1_strong_judged.jsonl
+python evals/eval_ceiling.py --per-type 30 --model gpt-5.6-luna \
+    --dump runs/dumps/m1_strong_judged.jsonl --oracle-dump runs/dumps/oracle_judged.jsonl
 
-# 3) LLM-judge 评测（openevals，judge=模型；--upload 另推 LangSmith）
-python evals/eval_rag.py --n 8                # 本地打分表
-python evals/eval_rag.py --n 8 --upload       # 同上 + 推 dataset + experiment 到 LangSmith
-
-# 4) agentic RAG —— 另一条路：模型自己决定查不查 / 多跳 / 何时停
-python run_agentic.py "Who is the individual ... facing a criminal trial?"
-
-# 4b) **推荐路径**：MuSiQue（真桥接多跳，见第七节②）+ 头号三指标，全程不碰 LangSmith
-#     语料/题目走 HuggingFace 缓存（~/.cache/huggingface），仓库里只有加载器 rag/corpus_musique.py
-python -c "from rag.corpus_musique import load_corpus, load_questions; print(len(load_corpus()),'段',len(load_questions()[0]),'题')"
-RAG_TOPK=8 python evals/eval_agentic.py --benchmark musique --local runs/dumps/mq.jsonl --per-type 7
-python evals/eval_judge.py runs/dumps/mq.jsonl --benchmark musique          # correct/sufficient/faithful
-python evals/eval_judge.py runs/dumps/新.jsonl --benchmark musique --baseline runs/dumps/旧.jsonl  # 同题配对 + 95% CI
-
-# 4c) 换评测集之前先跑这个：判它是不是**真**多跳（全确定性、无 LLM、几分钟）
-python evals/eval_benchmark_probe.py                # MultiHop-RAG / MuSiQue / HotpotQA 同口径横比
-
-# 5) 把全量数据集（含 gold 证据）传到 LangSmith（免费，不调模型）
-python evals/langsmith_upload.py               # 2556 题 → 数据集 multihop-rag
+# 检索侧量具（确定性、纯本地 GPU、不花钱）
+python evals/eval_hop.py --ablate          # 整栈消融
+python evals/eval_hop.py                   # pool × k 逐跳网格 + 出图
+python evals/eval_benchmark_probe.py       # 数据集探针
 ```
 
-> **网关提示**：某些中转网关 WAF 拦未知 UA → 设 `RAG_USER_AGENT`；偶发 5xx/超时 → `RAG_MAX_RETRIES` / `RAG_TIMEOUT`（`build_model` 已读取）。
-> `evals/eval_rag.py` 单题失败会跳过、不毁整轮。
+> `evals/demo_set.json` 的 9 道题是**演示用**，**别用它算准确率**。
+> 网关 WAF 拦未知 UA → 设 `RAG_USER_AGENT`；偶发 5xx → `RAG_MAX_RETRIES` / `RAG_TIMEOUT`。
 
 ---
 
-## 五、架构与关键设计
+## 五、评测设计 ★
 
-**一句话**：`Retriever` 协议给我可替换后端；hybrid 把词法/向量的盲区互补起来；reranker 精排；生成只用检索到的内容并标引用。
+这是这个项目的主体。**六条规矩，每条都对应一个若不遵守就会读错的具体场景。**
 
-```python
-# rag/retriever.py —— 后端只需实现这个协议，其余代码全不动
-@runtime_checkable
-class Retriever(Protocol):
-    def search(self, query: str, k: int = 4) -> list[Hit]: ...
+### 5.1 三个头号量，三个**互不重叠**的参照系
 
-# 三个后端，同一协议：
-#   BM25Retriever     词法（rank_bm25）
-#   DenseRetriever    bge-large-en-v1.5 向量 → Chroma 持久化库，余弦近邻（有 GPU 自动用 CUDA）
-#   HybridRetriever   ↑两者 RRF 融合 → bge-reranker-v2-m3 重排
-```
+早期三个分里有两个从**同一个** agent 可控产物（它自己写的引用）算出：
+`sufficient` 是"它引的那几句够不够"、`faithful` 是"答案能否追回它引的那几句" ——
+后者**引得越少越容易满分**。两者构造上拮抗，所以三版提示词只是在同一条权衡曲线上滑：
 
-**HybridRetriever 的三步**（`rag/retriever_hybrid.py`）：
-
-1. **召回**：BM25、Dense 各取 top-`pool`(默认 **200**)。pool 的**信息量**要与 chunk 匹配——`pool×chunk ≈ 恒定`；chunk 缩到 600 后 100→200 有收益、200→300 只涨池覆盖不涨交付（实验 19 ⑥）。
-2. **融合**：**RRF 倒数排名融合**（默认，`score = Σ w/(rrf_k+rank)`）——只看排名、不看分数，对 BM25(无上界) 与余弦([-1,1]) 不可比的量纲免疫（业界标配）；另留 min-max 加权(`fusion="minmax"`)做对照。默认权重均衡 `w_bm25 = w_dense = 0.5`。
-3. **重排**：融合候选池丢给 `bge-reranker-v2-m3`（cross-encoder），按 (query, passage) 相关性取 top-k。
-
-> 想调：`HybridRetriever(docs, fusion="rrf", w_dense=.7, pool=200, rrf_k=60)`；参数消融见 **EXPERIMENTS 实验 6 / 19**（`python evals/eval_ablation.py`、`python evals/eval_rebuild.py`，免费、不调 LLM）。默认已用 `bge-large-en-v1.5`（1024 维）+ `bge-reranker-v2-m3`（GPU 上跑）；无显卡的机器可在 `rag/retriever_dense.py` / `rag/retriever_hybrid.py` 改回 `bge-small-en-v1.5` / `bge-reranker-base`。
-> **整套配置可在 shell 层整体切换**做 A/B，不必改代码：`RAG_CHUNK_SIZE` / `RAG_CHUNK_OVERLAP` / `RAG_POOL` / `RAG_TOPK`。
-
----
-
-## 六、评测设计
-
-### 6.1 头号指标（`evals/eval_judge.py`）—— 一次裁判调用，三个分
-
-指标一度长到 15 个，**头号指标却一直不可信**，于是只能不断加诊断指标去补。2026-08 推倒重来：
-
-| 指标 | 量什么 |
-|---|---|
-| `correct` | 答案与标准答案是否实质一致 |
-| `sufficient` | **agent 自己引的那几句**够不够推出标准答案（= "召回"，**按需判、不要求全覆盖**） |
-| `faithful` | 答案里的每个论断能否追回到它引的句子 |
-
-为什么不再用「gold 证据句子串匹配」当头号指标（实验25/26 实测）：**过严**（gold 句只是作者挑的
-某一句，同篇另一句同样能支撑却判 0）、**冗余同权**（MultiHop-RAG 的 inference 平均 3.36 条证据里
-只有 1.47 条真含答案）、**没有成本项**（搜 10 次必然赢过搜 1 次）。所以改由裁判**逐题判哪些证据是必��的**。
-
-### 6.2 守卫（确定性，零成本）—— 没有它，上面三个分会在最关键的地方骗人
-
-| | |
-|---|---|
-| `cited_grounded` | agent 引的句子里，真能在它**实际检索到**的上下文中找到的比例 |
-
-引用是 agent 的**自述**。不核对的话，「没检索到」和「检索到了但没引」长得一模一样 —— 会写引用的
-模型分高、检索一样好但引用潦草的模型分低。低于 0.8 时 `evals/eval_judge.py` **拒绝给出结论**。
-
-> **这个守卫救过一次场**（实验27）：某版提示词让 `faithful` 从 0.524 涨到 0.619，看着是改对了；
-> `cited_grounded` 同时从 0.94 掉到 0.77 —— 真相是 agent 在**编引用**，而忠诚于自己编的句子当然容易。
-
-### 6.3 诊断（`--diag` 才打印，只在头号指标动了、要归因时看）
-
-`delivered` = 检索**实际交付**的证据链比例 / `fate_cited` 引用了 / `fate_uncited` **检索到却没引**
-/ `fate_missing` 真缺口 —— **这三者必须分开**，混在一起会把提示词问题误判成检索问题、去调错的旋钮。
-另有 `recall@B`（固定上下文预算）、逐跳边际召回、`n_search`、`n_unsupported`。
-
-### 6.4 退役
-
-`context_recall`(title 级，实验8-9 证明**方向会反**)、openevals 的 `groundedness` /
-`retrieval_relevance` / `helpfulness`（从未提供过信息量，已被头号三分覆盖）。
-`context_recall_fact` 降级为**过严的下界**，只在它与裁判分打架时看。
-
-### 6.5 两条永远要记得的
-
-- **裁判固定**（`RAG_JUDGE_MODEL`）。换裁判 = 换尺子，新旧分数不可比（实验13）。
-- **`correct` 的绝对值要减地板**。MultiHop-RAG 的 comparison 96% 是 Yes/No 且 59.8% 答 "yes" ——
-  一个恒答 "Yes" 的空壳就有 0.60。MuSiQue 无此问题（最高频答案仅占 1.4%）。
-
----
-
-## 七、实测结果
-
-> 完整的 28 次实验（设置 / 命令 / 数据 / 结论，含被后续实验推翻的条目）都记在
-> **[`EXPERIMENTS.md`](EXPERIMENTS.md)**；这里只放最能打的几张表。
-
-**① MultiHop-RAG 不是多跳评测集**（实验25 · 全确定性、无 LLM · `python evals/eval_benchmark_probe.py`）
-
-同一把尺子横量三个数据集（例内 BM25、候选池统一 20 篇、top5）：
-
-| 数据集 / 子集 | ⚑**捷径率** | 一次拿全 | 最高频答案占比 |
+| 提示词 | 引用属实 | faithful | 真相 |
 |---|---|---|---|
-| MultiHop-RAG 全部 | **99.3%** | 76.5% | 34.5% |
-| HotpotQA bridge | **96.5%** | 95.7% | 0.4% |
-| MuSiQue 2hop | 79.6% | 78.6% | 0.8% |
-| MuSiQue 3hop | 81.8% | 58.3% | 4.0% |
-| **MuSiQue 4hop** | **69.0%** | **33.3%** | 12.1% |
+| v1 什么都不要求 | **0.94** | 0.524 | — |
+| v2「N 跳至少 N 行引用」 | **0.77** ⛔ | 0.619 ↑ | 分涨是因为它在**编引用** |
+| v3 给 `unsupported:` 出路 | 0.87 | 0.643 | 认怂环 0→0.7，但**变省也变懒** |
 
-⚑捷径率 = 光靠**原问句**就够到了**含答案那篇** → 中间的跳可以整个跳过。
+**修法** —— 三个量各用一个不重叠的参照系：
 
-- MultiHop-RAG 里 **99.3% / 92.2% / 83.9%** 的问句已把每篇 gold 文章的**出处点名**
-  ——不存在"先查 A 才知道要查 B"。它是 **multi-document（跨文档聚合）**，不是 **multi-hop（顺序推理）**。
-- **连"名字是 bridge"也不可信**：HotpotQA 的 bridge 子集桥接率 90.3%，捷径率仍有 96.5% ——
-  **结构像桥接，行为不是**。所以换数据集前先跑这个探针，别看名字。
-- 由此统一解释了此前三件一直没解释通的事：`n_search` 恒在 1.2、k 从 4 到 64 不改变迭代次数、
-  强制查询分解端到端收益为零。**agentic RAG 在 MultiHop-RAG 上结构性地拿不到优势，不是实现问题。**
+| 指标 | 参照系 | 怎么来 | 能被"多引/少引"操纵吗 |
+|---|---|---|---|
+| `correct` | **gold 答案** | 裁判 | 否 |
+| `grounded` | **agent 实际检索到的全部上下文** | 裁判 | **否** |
+| `delivered` | **gold 证据 ∩ 检索上下文** | **确定性**，零裁判噪声 | 否 |
 
-**② 换到 MuSiQue：一行代码没改，agent 自己就多跳了**（实验26 · 同模型同配置同规模 n=21）
+**换完当场兑现**：换更强的模型让引用属实率 0.78→0.98，旧 `faithful` 一定大涨；
+新 `grounded` 报的是 **+0.068、跨 0、不显著**。同一批数据，旧尺子给捷报，新尺子给零。
 
-| | MultiHop-RAG | MuSiQue |
+### 5.2 裁判分怎么打（本项目是 **LLM-as-judge**）
+
+- **裁判模型固定**（`deepseek-v4-pro-nothinking`，`temperature=0`），与答题模型**不同**，
+  且被 `__meta__` 记录；**裁判不同 = 拒绝配对**。
+- 每题一次调用，同时判 `correct` / `grounded` / `sufficient`，并**逐条列出 `ungrounded_claims`**
+  —— 让这个分**可审计**，而不是一个黑箱数字。
+- **空答案确定性兜底归 0**，不送裁判（否则"没有论断"会被判成"忠诚度平凡为真"，**打空的题反而加分**）。
+- **分辨率下限先测出来**：同一 dump 判两次 → `correct` 0.478/0.500、`grounded` 0.676/0.727
+  ⇒ **n=90 下小于 0.05 的差异不要解释。**
+- ⇒ **配对比较的两臂必须由同一次裁判调用判分。**跨 pass 时漂移会被整个记到自变量头上：
+  查询分解那一臂"各判各的"是 **+0.080**，同 pass 只有 **+0.023** —— **3/4 是漂移**。
+
+### 5.3 `correct` 必须拆开：**不肯答 ≠ 答错**
+
+`correct ≈ 给答案率 × correct@给了`。两者在 correct 上都是 0、长得一样，但该调的旋钮完全不同。
+
+| 题型 | correct | 给答案率 | correct@给了 | 拒答丢的分 | 答错丢的分 |
+|---|---:|---:|---:|---:|---:|
+| 1hop | 0.933 | 1.000 | 0.933 | 0.000 | 0.067 |
+| 2hop | 0.667 | 0.767 | 0.826 | **0.233** | 0.133 |
+| 3hop | 0.767 | 1.000 | 0.767 | 0.000 | **0.233** |
+| 4hop | 0.633 | 0.733 | 0.818 | **0.267** | 0.133 |
+
+**2hop/4hop 的主要损失是拒答，不是答错。** 再往下拆那 15 道拒答：
+**8 道 gold 证据全部交付却仍拒答**、7 道确有检索缺口。逐条核过那 8 道的 gold 原文后，
+7 道是 **gold 段没写那条关系**（→ `gold_not_stated`，§3.3），1 道是 agent 表述问题。
+
+### 5.4 四个守卫
+
+| 守卫 | 拦什么 |
+|---|---|
+| `cited_grounded` <0.8 | agent 在**编引用** —— 此时只作废 `sufficient`，其余照读 |
+| **截断率平价** | 交付更多字符的臂更容易被截断 → `grounded` 系统性偏低。两臂截断率不等就**拒绝出这一格** |
+| **`__meta__` 自动比对** | 语料/裁判不同 = 直接拒绝配对；其余差异作为「自变量」打印出来 |
+| **样本量告警** | n<60 时印出"这批样本只够分辨 ±X" |
+
+### 5.5 成本项必须和分数一起读
+
+`n_ctx_chars` / `n_llm_calls` / `n_search` 逐题记录。
+**没有成本项的指标必然奖励"塞得更多"** —— 本项目在这上面栽过四次（title 级 recall、
+`context_recall_fact`、可达空间利用率的分母、池覆盖）。
+
+### 5.6 报改动之前，先报"还剩多少空间"
+
+```
+地板 closed   不给检索，凭参数化知识答
+实测 rag      现行系统
+天花板 oracle 把 gold 喂给**同一套 agent**（--oracle），唯一差别是"证据从哪来"
+★ 检索还能买到 = 天花板 − 实测      ← 决定"要不要继续投检索"的那个数
+```
+
+**优先看这个差，不要看比值。** 比值的分母是（天花板 − 地板），而**地板线每轮要重新生成**：
+同配置重跑一次，3hop 地板从 0.400 掉到 0.214，那一档的"利用率"随之在 **0% 与 44%** 之间摆。
+
+⚠️ **天花板两个方向都会偏**：没有干扰项（偏乐观）；gold 标注不完整（偏悲观，实测出现过利用率 118%）。
+
+---
+
+## 六、架构
+
+```
+rag/                      # ★ 核心，只被依赖、不依赖 evals/
+├── retriever.py          # Retriever 协议 + Doc/Hit —— 换后端时上层一行不动
+├── retriever_{bm25,dense,hybrid,decompose}.py
+├── reranker_qwen.py      # Qwen3-Reranker-4B（对照用，非默认）
+├── agent.py              # ★ ReactRunner / PlannerRunner + 拒答三分类
+├── prompts.py            # react 六条策略（v3，已冻结）+ planner 三段
+├── tools.py              # rag_search：暴露给模型的唯一工具
+├── llm.py                # ★ 模型注册表：模型名 → base_url + key
+├── runctx.py             # ★ 配置快照 + 带 __meta__ 头的 dump 读写
+└── corpus_{musique,multihop}.py
+
+evals/                    # 每个都能 python evals/xxx.py 直接跑
+├── eval_agentic.py       # ★ 跑 agent + 确定性指标，边跑边落盘、--resume、--oracle
+├── eval_judge.py         # ★ 头号三分 + 同题配对 95% CI
+├── eval_ceiling.py       # ★ 地板 / 实测 / 天花板
+├── eval_hop.py           # ★ 逐跳召回网格 + 整栈消融（确定性、纯本地）
+├── eval_pool.py          # pool × k 网格（单发口径，见 §2.6 的告诫）
+├── eval_rebuild.py       # 逐层重建验收
+├── eval_benchmark_probe.py / audit_dataset.py / eval_ragas.py
+└── archive/              # 冻结的旧脚本（附退役原因）
+```
+
+**两条 agentic 控制流**（同一个 runner 接口）：
+
+| | **react**（默认） | **planner** |
 |---|---|---|
-| **n_search** | 1.24 | **1.81** |
-| correct | 0.762 | 0.476 |
-| 猜测下限 | ≈0.46 | **≈0.01** |
-| **高出下限** | +0.30 | **+0.46** |
-
-**分数低不等于更差**：MuSiQue 那个 0.476 里的真信号比 MultiHop-RAG 的 0.762 还多。
-
-**③ 压 k：省三分之二上下文而覆盖不变**（实验27 · **三臂配对** n=21 · 同题同 `example_id`）
-
-| 配对对照 | 检索次数 | 片段数 | 证据链交付 |
-|---|---|---|---|
-| 提示词（v1→v2, k 都=32） | +0.43 [−0.29,+1.10] 跨0 | +13.7 跨0 | +0.016 跨0 |
-| **k（32→8, 提示词相同）** | **+0.67 [+0.24,+1.14] ✅** | **−48.4 [−64.8,−32.0] ✅** | +0.012 跨0 |
-
-**同样的证据链覆盖，上下文只花三分之一。** 而同一个旋钮在 MultiHop-RAG 上完全无效（k 4→64
-纹丝不动）——**差别全在题目结构**：那边一次就能拿全，压 k 没有压力传导。
-
-**④ 一次失败的改动，留档**（实验27 ④）：给提示词加"N 跳至少 N 行引用"想修"引用不全"，
-结果 `cited_grounded` **0.94→0.77** —— agent 为凑行数**编引用**。
-**约束了输出形状，就会得到形状，代价是内容。** 提示词遂全文重写（v3），第一原则改成
-「任何"必须产出 X"的要求，都必须同时给出一条不用编造的出路」（`unsupported: <哪一环>`），
-**忠诚度优先于完整度**。
-
-**⑤ 逐层重建检索栈**（实验 19-20 · 每型 60 题 · 确定性、免费、可复现 · `python evals/eval_rebuild.py`）：
-
-| 层 | 改动 | 单点自检（给这层最有利的输入） | 结果 |
-|---|---|---|---|
-| BM25 | **不动** | 用证据句原文自查 top1 | 97~100%，全程健康 |
-| embedding | chunk 1200→**600**/overlap 150 | 同上，dense | **56% → 73%**，三类齐涨 |
-| 融合 | pool 100→**200** | 融合 ≥ 更好的那条单路腿？ | @4 **−0.026 → +0.022**（由负功转正） |
-| 重排 | 不动（bge） | 重排 ≥ 不重排？ | comparison/inference 显著为正，temporal 无可检出效应 |
-
-**等交付字符**下的 fact 级召回（重排后）：旧 `1200/pool100/@16` **0.749** → 新 `600/pool200/@32` **0.779**，**三个题型全部改善**（temporal +0.058）。若 `k` 不变，则**上下文减半而召回略高**（0.672 vs 0.650）。
-
-**⑥ 端到端 A/B（诚实版）**（实验 21 · 同模型同题配对 · n=87 · `deepseek-v4-pro`）：`context_recall_fact` 配对差 **+0.022，95% CI [−0.066, +0.105]** —— **测不出差异**，不能宣称端到端变好。原因见实验21 ③：agent 自己已经在做查询改写、方差被 agent 的非确定性主导，要分辨 0.03 需每型约 700 题。
-> **方法论：改动发生在哪一层，就在哪一层量。** 端到端该回答"这套系统整体行不行"，不该回答"我这个部件改好了没有"。
-
-**⑦ agentic 多跳 · 100 题 · 按 question_type**（⚠️ **旧配置** RRF+Chroma+pool=100+k=8 + 答题模型 grok-4.5 · LangSmith `agentic-on-multihop-rag-d61482cc`；grok 已从网关下线、配置也已换代，此表仅作历史参考）：
-
-| type | correctness | groundedness | retrieval_rel | helpfulness | context_recall | refused |
-|---|---|---|---|---|---|---|
-| comparison | 0.80 | 0.74 | 0.60 | 1.00 | 0.85 | 0.00 |
-| inference | **1.00** | 0.75 | 0.87 | 1.00 | 0.72 | 0.00 |
-| temporal | 0.67 | 0.83 | 0.54 | 0.97 | 0.83 | 0.16 |
-| null | – | 0.96 | 0.03 | 0.64 | – | **0.92** |
-
-- **多跳 correctness ~0.82**（vs 单次 0.42）：inference 满分、temporal 最难、null 92% 正确拒答；groundedness 0.77。（表中 `context_recall` 是**标题级**口径，仅为与早期实验可比而保留——它是漏水的代理，见下条；现行评测已改用 fact 级 `context_recall_fact`，honest 值 ~0.63。）
-- **一条踩过、也修好的坑（含金量高）**：曾用 source 去重把 title 级 `context_recall` 刷到 0.89，correctness 却掉了——fact 级诊断发现去重在**游戏漏水的代理指标**、丢了真证据（Goodhart）。撤销去重、只留 `k=8` 后 correctness 反升到 **0.82**（实验 8-9）。**教训：盯 correctness / fact 级召回，别优化 title 级代理。**
-- **第二条坑（评测框架本身）**：`target()` 里一句 `except: return 空结果` 把网关 502 吞成空答案，被裁判打 **0 分并计入均值**，整轮实验读起来像"模型变差了"（实测 temporal 8 题空了 7 题）。修法：长退避重试 → 仍失败就 `raise`，让 LangSmith 标 **errored 并排除出均值**。**教训：评测里失败必须可见，不能降级成 0 分**（实验 12）。
-- **第二条坑的复发（实验 21 ①）**：`_run_once` 在流式事件里只读 `messages[-1]`，**同一轮的并行 `rag_search` 被吞掉**——实测 2 次检索只捕获 1 次，`context_recall_fact` 报 0.500 而真值 1.000。**这个 bug 只会让检索看起来更差**，"召回上不去"的表象里有一部分是评测自己造的。同时新增确定性指标 **`n_search`**：此前"**模型压根没查**"（实测 90 题里有 6 题）与"**检索器没捞到**"在指标上长得一模一样，归因会全错。
-- **第三条坑：分子群分析救了我一次，又坑了我一次**（实验 15 → 实验 20）。实验15 分题型发现"bge 在 temporal 上净减益 **−0.100**、51% 的证据被往后推"，写成头条、进了 README、指导了后续三个实验的方向。**实验20 用同一配置把每型 15 题加到 60 题，这个数没能复现**：Δ@8 变成 **+0.031，95% CI [−0.042,+0.108]（不含 −0.100）**，"51% 被推后"变成 39% 被推后、中位名次 6→9 变成 8→7 **推前**。原因很朴素：**15 题的标准误差约 0.09，而结论依据的效应量是 0.10——信噪比约等于 1。** ⇒ **"按子群拆开验"这个动作是对的，但拆子群会让样本变小、更容易把噪声读成信号：分子群分析必须配置信区间。**
-- **reranker 的真实价值（实验 20，每型 60 题 + 配对 bootstrap）**：comparison **+0.13 [+0.07,+0.20]**、inference **+0.11 [+0.04,+0.18]**（@8，区间不跨 0，真效应）；temporal 四个 k 的区间**全部跨 0**、点估计正负横跳（+0.022/−0.039/−0.025/+0.028）——**不是负增益，是没有可检出的效应**。默认保留 bge。
-- **第四条坑：chunk 对比没控制住「交付信息量」**（实验 18）。实验11 用固定 `fact@8` 比不同 chunk——8 个 1200 字符的块 = 9600 字符、8 个 300 字符的块只有 2400 字符，**信息量差 4 倍**，小块必输。按**总字符对齐**重测后结论反转，且 **dense 精度只跟「块长」有关、跟「递归/按结构切」无关**（纯段落1000 与递归1200 自查同为 60%）。
-- **第五条坑：尺子本身对被比的变量不中立**（实验 19 ①）。我们从实验10 起用的 `fact@k` 只检查证据句的**前 120 字符**——**证据被切断它完全看不见**：chunk=400 时全句留存已掉到 89~95%，而"前120留存"仍报 100%。**于是块越小越占便宜**，实验18 的"~500 甜点"是被这把偏心的尺子量出来的，计入截断后落点是 **600**。⇒ **控制变量要控制到「指标本身」：先怀疑尺子，再怀疑被测对象。**
-- **最贵的一条：embedding 在最简单的任务上只有一半命中率**（实验 17 → 实验 19 修复）。**用证据句的原文去检索包含该原文的 chunk**，chunk=1200 时 dense 只有 **56%** 排到第 1，而 BM25 是 **98%**。排除了 Chroma 后定位到 **长块稀释句子级语义**。**这个硬伤从项目第一天就在，被所有端到端指标漏掉了。**
-  > **教训：端到端指标必须配一组「单点能力自检」**——给每个部件最有利的输入，看它能否接近满分。否则某个部件长期半残，整体指标只会显示「就这样了」，不会告诉你是谁拖的。
-- **融合层曾经是负资产，修好上游后才转正**（实验 16 → 实验 19 ④）。实验16 测得"融合从未提升交付、上游优化空间≈0"，**那是坏 dense 腿的下游症状**：chunk=1200 时融合相对更好单路腿在 @4 是 **−0.026（负功）**、@8 约等于 0；chunk 改成 600 后**每个 k 都是正的**（+0.022~+0.059）。⇒ **别把"坏输入下的表现"当成部件的固有属性。**
-- **查询侧：真正起作用的是「重排跟着子问句走」，不是「分解」本身**（实验 14 → 实验 22-23，每型 100 题 + 配对 CI）。**同一批子问句、同一候选池**（池覆盖一模一样）下，"每个子问句各自重排再拼"比"合并后用原问句重排"高 **+0.059 [+0.026,+0.093]** —— 这个纯机制对照比"分解 vs 不分解"（+0.050 [+0.014,+0.085]）还强。而**只做分解不动重排（−0.009）、同义改写（−0.012）都跨 0，等于白做**。
-  > 实验14 的**机制说对了、措辞和效应量说错了**：它的"唯一越过不重排天花板"依赖一个 15 题的伪基线——**不重排其实是显著更差的**（−0.040 [−0.073,−0.006]）。
-  > **「扩大召回若不改变前排顺序，就不会变成交付」——这条规律在实验16 / 19 / 22 / 23 上重复了四次。**
-  > ⚠️ 未落地：代价是每次检索多 1 次 LLM 调用 + 3 倍重排；而 agent 本身已在自发做事实层改写（实验21 ③），**这份收益可能与之重叠**，落地前得先测端到端还剩多少。
-
-
-> **一句话：多跳不是万能钥匙，是"用忠实度和成本换覆盖与正确率"的可量化选择。** 全部实验在 LangSmith 数据集 `multihop-rag` 上可复现，细节见 [`EXPERIMENTS.md`](EXPERIMENTS.md)。
+| 多跳怎么发生 | 模型自己决定查不查/几次/何时停 | `plan → 逐跳搜 → 逐跳抽 → 合成`，**代码保证** |
+| 引用从哪来 | agent 自写 `KEY EVIDENCE`（**自述**） | 从每跳 quote **确定性拼出**（控制流副产品） |
+| 实测 | — | `delivered +0.196 ✅`、引用造假**结构性消除**（0.784→0.997），<br>但 `correct −0.180 ⛔`（拒答率 0.244→0.416）⇒ **不设默认** |
 
 ---
 
-## 八、路线图
+## 七、结论与已停止的方向
 
-- **混合检索（✅）**：BM25 + bge dense 加权融合 + bge-reranker 重排，同一 `Retriever` 协议。
-- **评测指标推倒重建（✅，实验25-27）**：openevals 四轴 → **头号三分 + 一个确定性守卫**
-  （`correct` / `sufficient` / `faithful` + `cited_grounded`），见第六节。起因是指标长到 15 个而
-  **头号指标一直不可信**，只能不断加诊断去补。`evals/eval_judge.py`，一次裁判调用出三个分。
-- **检索调优（✅）**：RRF 融合 + 参数消融（实验 6）——`rrf_k` / 权重在合理区间不敏感。**pool 不是独立杠杆**：它的**信息量**要与 chunk 匹配（`pool×chunk ≈ 恒定`，实验 19 ⑥），且**只涨池覆盖不改前排顺序时，不会变成交付**。
-- **逐层重建检索栈（✅，实验 19-21）**：BM25 不动 → embedding（chunk 1200→600）→ 融合（pool 100→200）→ 重排（保留 bge）。**每层两条验收缺一不可**：给这层最有利输入的**单点自检** + **按题型均衡**；从实验20 起再加**配对 bootstrap 置信区间**。脚本 `evals/eval_rebuild.py --layer 0/1/2/3`，全程确定性、免费。
-- **更强 reranker（✅，评测级）**：`rag/reranker_qwen.py` 提供 instruction-aware 的 **Qwen3-Reranker-4B**（`evals/eval_agentic.py --reranker qwen`），fact 级交付显著优于 bge；代价 ~13s/次重排 + ~8GB 显存，故**默认仍是 bge**、4B 作评测/对照用（实验 11-12）。
-- **下一步（待做）**：① **样本量** —— 目前 MuSiQue 上所有结论都卡在 n=21（区间宽 ±0.1~0.2），
-  要判效应得 per-type 30（=90 题）；② **提示词的忠诚度问题**（见上）；③ 把「逐子问句重排」落到
-  `rag/tools.py`（检索侧已证实 +0.059 [+0.026,+0.093]，但 agent 本身在自发改写，需先测端到端还剩多少，
-  实验 23 ④）；④ **MuSiQue 4hop 是最该攻的靶子** —— 三个数据集里唯一"一次检索只有 1/3 能拿全"的子集。
-- **答题模型可换、裁判要固定（✅）**：`evals/eval_agentic.py --model <名>` 只换答题端，裁判走 `llm.build_judge()`（`RAG_JUDGE_MODEL`）不动；裁判模型下线时用 `evals/eval_rescore.py` 拿新裁判把**存档 run** 统一重打分，旧实验照样可比（实验 13）。
-- **配置可在 shell 层整体切换（✅）**：`RAG_CHUNK_SIZE` / `RAG_CHUNK_OVERLAP` / `RAG_POOL` / `RAG_TOPK` —— 新旧配置 A/B 不必改代码（实验 21）。
-- **向量库（✅）**：`DenseRetriever` 已从内存 numpy 换成 **Chroma** 持久化向量库（`.cache/chroma/`，近邻检索）——同 `Retriever` 协议、上层一行不动。⚠️ HNSW **只在 top1 上与精确余弦 100% 一致**；top100 的集合重合是 96%（`evals/eval_rebuild.py --layer 0`）。差异落在 k 截断的边界上，重排后基本被吸收（绝对值差 ≤0.005）。
-- **agentic RAG（并存 ✅）**：`run_agentic.py`（create_agent，六条策略），与流水线共用 `Retriever` 协议；最初的「agentic vs 单次」对比在 tag `v1-agentic-comparison`。
-- **换到真多跳评测集（✅，实验25-26）**：`evals/eval_benchmark_probe.py` 实测 MultiHop-RAG 捷径率 **99.3%**
-  ——它是跨文档聚合、不是顺序推理，**agentic 在它上面结构性地拿不到优势**。改用 **MuSiQue**
-  （`rag/corpus_musique.py`，21100 段 / 2417 题 / 2-3-4hop），换过去后 `n_search` 一行代码没改自己涨了 46%。
-- **提示词（🟡 未达标，实验27-28）**：为修"引用不全"改过两版，**一次反向（`cited_grounded` 0.94→0.77，
-  agent 凑行数编引用）、一次持平（v3 加 `unsupported:` 出路，回到 0.87）**。目前忠诚度最高的仍是
-  什么都不要求的 v1。**这是当前最大的未解问题。**
-- **历史归档**：自研确定性指标 + agentic-vs-单次对比脚本仍在 tag `v1-agentic-comparison`（未搬回 master）。
+**⛔ 有数据支撑的"不做"**
+
+| 不做什么 | 依据 |
+|---|---|
+| 继续调 k / chunk / pool / 融合权重 | 单次效应量 0.02–0.04，**全落在裁判噪声 0.05 以内** |
+| 继续改提示词提"忠诚度" | 那是**尺子的构造问题**，不是措辞问题（§5.1） |
+| 在检索上再投 | 完美检索总共只值 **+0.102**，而换模型买到 +0.148 |
+| 把 planner 设为默认 | `correct −0.180 ⛔` |
+| 上查询分解 | 检索侧 +0.050 ✅，端到端 `delivered +0.025`、`correct +0.023`，**全跨 0** |
+| 换"更容易"的评测集 | HotpotQA 捷径率 96.5% —— **用自己的探针就能证伪自己** |
+| 报"可达空间利用率" | 分母含地板，同一档能在 0%↔44% 之间摆（§5.6） |
+
+**🟡 若继续，只剩这两件（都不是检索）**：`multi_answer` 改判分口径而非剔题；样本量到 n≳200。
 
 ---
 
-## 九、一句话面试话术
+## 八、一句话面试话术
 
-> 「RAG 的上限在检索，不在生成。所以我搭了一条生产级检索栈：**BM25 词法 + bge 向量（Chroma 库）RRF 融合**把两种召回的盲区互补，
-> 再用 **cross-encoder 重排**精排——召回和精度分两步拿。后端全在一个 `Retriever` 协议后面可替换。评测我用 **openevals 的
-> LLM-as-judge**（correctness / 忠实度 / 检索相关性 / helpfulness），裁判走网关模型，一键推 **LangSmith** 做实验追踪。
-> 这个项目还**并存**着一个 agentic RAG（`run_agentic.py`：模型自己决定查不查、多跳、何时停）——**我知道 agentic 和强检索是两条正交、互补的路，也知道各自该怎么量化。**」
+> 「RAG 的上限在检索，所以我搭了一条生产级检索栈：BM25 + bge 向量 RRF 融合补盲区、
+> cross-encoder 重排提精度，后端全在一个 `Retriever` 协议后面可替换。上面并存两条 agentic 控制流。
+> **但这个项目真正的内容是评测** —— 我把'指标推不动'这件事本身当成 bug 排查了。」
 
-**如果只讲一件事，我会讲这个**：
+**只讲一件事**：
 
-> 「这条栈我推倒重来过一次，因为排查发现 **embedding 从项目第一天起就是半残的**——拿 gold 证据句的**原文**去检索包含它的片段（对检索器最有利的输入，query 就是答案本身），dense 只有 **56%** 排到第 1，而 BM25 是 98%。
-> **所有端到端指标都没报警**，它们只会显示"就这样了"，不会告诉你是谁拖的。
-> 更值钱的是后来发现：我此前几次方向性误判，**没有一次是模型不行，全是量错了**——网关 502 被 `except` 吞成 0 分计入均值；全类型平均掩盖了子群；**分子群之后样本太小，又把噪声（n=15 的 −0.100）读成了系统性结论并写进 README**；跨 chunk 比较时 `fact@k` 只查证据句前 120 字符，对小块系统性宽容。
-> 所以我把重建做成了**逐层验收**：每层给它最有利的输入做**单点自检**、**按子群拆**、**配对 bootstrap 置信区间**、**对齐混杂变量**、还要**检查尺子对被比的变量是否中立**。
-> 结果是 dense 自查 56%→73%、等上下文预算下 fact 召回 0.749→0.779（三个题型齐涨）；而**端到端 A/B 是 +0.022 [−0.066,+0.105]，测不出差异，我不会说端到端变好了**——要分辨 0.03 需每型约 700 题。
-> **改动发生在哪一层就在哪一层量；被推翻的旧结论我原文保留、只加订正标注**（`EXPERIMENTS.md` 实验 14/15/16/18 都有）。」
+> 「我三个头号指标里有**两个**是从同一个东西算出来的——agent 自己写的引用，
+> 而'忠诚度'是'答案能否追回它引的那几句'，**引得越少越容易满分**。
+> 所以这两个分构造上拮抗，我改两版提示词只是在同一条权衡曲线上滑。
+> 修法是让三个量各用一个互不重叠的参照系。**换完当场兑现**：换个更强的模型让引用属实率
+> 0.78→0.98，旧尺子一定报'忠诚度大涨'，新尺子报的是 **+0.068、跨 0**。」
 
-**如果还有时间，我会讲这个**：
+**第二件**：
 
-> 「最后我把**评测集本身**也证伪了。项目一直用 MultiHop-RAG，名字里带 MultiHop——但我写了个探针实测：
-> **99.3% 的题，光靠原问句就能直接够到含答案的那篇文档**，中间的"跳"可以整个跳过；99.3% 的问句
-> 已经把每篇 gold 文章的出处点名了，不存在"先查 A 才知道要查 B"。**它测的是跨文档聚合，不是顺序推理。**
-> 而且**连"名字是 bridge"的也不可信**——HotpotQA 的 bridge 子集结构上 90.3% 是桥接，行为上捷径率仍有 96.5%。
-> 这一条把此前三件一直没解释通的事统一解释了：`n_search` 恒在 1.2、k 从 4 调到 64 不改变迭代次数、
-> 强制查询分解收益为零。**不是实现问题，是题目不需要多跳。**
-> 换到 MuSiQue（捷径率随跳数单调下降、构造上保证桥接、猜测下限≈0）之后，**一行代码没改，
-> `n_search` 自己涨了 46%**。同一个"压缩 k"的旋钮，在 MuSiQue 上省掉三分之二上下文而覆盖不变，
-> 在 MultiHop-RAG 上完全无效——**差别全在题目结构**。
-> 所以我现在报任何调优结论，都连同'它在什么结构的任务上成立'一起报。」
+> 「我给自己加了条规矩：**报任何改动之前，先报'还剩多少空间'**。把 gold 喂给**同一套 agent**
+> （模型/提示词/循环全不动，唯一差别是证据从哪来）得到天花板 0.739，真检索 0.636 ——
+> **把检索做到理论最优总共只值 +0.102**，而换个模型就买到 +0.148。**换模型 ≈ 把检索做到完美。**
+> 这个对比直接决定了我后面不再往检索里投。」
+
+**第三件（我最想讲的自我推翻）**：
+
+> 「我一度报'可达空间利用率'=(实测−地板)/(天花板−地板)，据此下过两次靶子判断，**两次都错**——
+> 因为地板线每轮要让模型现答一遍，同配置重跑一次 3hop 地板就从 0.400 掉到 0.214，
+> 那一档利用率在 0% 和 44% 之间摆。修法是**改看不做除法的（天花板 − 实测）**。
+> 这是我第四次栽在同一个模式上：**比值型指标的分母也是被测出来的，它的噪声会被整个放大**。
+> 同一个模式还让我把 `pool` 定错了 4 年——旧的 pool=200 是在**关掉重排**的情况下量'池覆盖'定的，
+> 只问'证据进没进池子'、没问'交付没交付'。换成逐跳召回重测，**pool 开大是负收益**。」
+
+**如果还有时间**：
+
+> 「我把**评测集本身**也证伪了：写了个全确定性探针，实测 MultiHop-RAG **99.3% 的题
+> 光靠原问句就能直接够到含答案那篇**，中间的'跳'可以整个跳过。换到 MuSiQue 后
+> **一行代码没改，`n_search` 自己涨了 46%**。所以我报任何数，都连评测集的探针结果一起报——
+> 同一套系统在这两个集上差 0.2–0.3。」
