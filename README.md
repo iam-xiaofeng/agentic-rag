@@ -378,6 +378,59 @@ evals/                    # 每个都能 python evals/xxx.py 直接跑
 | 引用从哪来 | agent 自写 `KEY EVIDENCE`（**自述**） | 从每跳 quote **确定性拼出**（控制流副产品） |
 | 实测 | — | `delivered +0.196 ✅`、引用造假**结构性消除**（0.784→0.997），<br>但 `correct −0.180 ⛔`（拒答率 0.244→0.416）⇒ **不设默认** |
 
+### 6.1 一条真实轨迹长什么样
+
+**"它到底跳没跳"不能靠 `n_search` 这个计数判断** —— 查 3 次也可能是同一个意思换 3 种说法。
+真多跳的**可证伪标志**是：**第 k 次查询里出现了第 k−1 次才拿到的桥接实体。**
+所以 runner 把 agent **实际发出的 query** 记进 `queries` 字段并在 CLI 打印：
+
+```bash
+python run_agentic.py "In what region of Phu Luong's country is John Phan's birthplace located?"
+```
+
+```text
+  ↳ 检索 #1  query='Phu Luong'                → 2312 字符
+  ↳ 检索 #2  query='John Phan birthplace'     → 5235 字符
+  ↳ 检索 #3  query='Da Nang region Vietnam'   → 2992 字符
+                     ^^^^^^^ 第 2 次检索才拿到的地名
+[过程] 检索 3 次 / LLM 调用 4 次 / 引用 3 句 / 认怂 0 环
+```
+
+4hop 那道更清楚 —— 桥接实体跨了两跳：
+
+```text
+  ↳ 检索 #1  query='Fort Hill university'                       ← 拿到 Clemson
+  ↳ 检索 #2  query='Edwards won primary'
+  ↳ 检索 #3  query='Clemson University national championships'   ← 用上了 #1 的结果
+  ↳ 检索 #4  query='Richmond Braves moved'
+[过程] 检索 4 次 / LLM 调用 5 次 / 引用 4 句 / 认怂 0 环
+```
+
+**LangSmith 轨迹与 experiment**：`.env` 里设 `LANGSMITH_TRACING=true`，然后
+
+```bash
+python evals/langsmith_eval.py --per-type 10 --run-per-type 5 --concurrency 2
+```
+
+会把**评测集 + 同一个 LLM-as-judge** 上传成 LangSmith 的 dataset + experiment，
+一条 example 一行，点进去能看到 agent 发了哪几个 query、每次 `rag_search` 返回什么、裁判给了什么理由。
+
+实测（8 类型 × 5 = 40 题）：`correct 0.82 / grounded 0.88 / delivered 0.87 / n_search 3.76`，
+**按题型的趋势与主评测一致**（1hop 与 inference 满分、4hop 0.50、null 的 `refused_ok` 1.00，
+`n_search` 从 1hop 的 1.2 次涨到 null 的 7.0 次）。
+
+> ⚠️ **LangSmith 在这个项目里是「过程可观测性」，不是「统计口径」。**
+> 所有分数来自确定性 dump + 同题配对 bootstrap（§5），trace 用来**看 agent 干了什么**、
+> 定位单题失败，**不参与任何数字的计算**（这里每格只有 n=5，区间宽约 ±0.4）。
+> 另外 §2 的检索栈消融**纯本地 GPU、不经过 LLM**，LangSmith 抓不到它。
+>
+> 📌 接 LangSmith 时踩到的三个坑，都写进了 `evals/langsmith_eval.py` 的注释：
+> ① **不可答题没有 gold，`correct` 对它在定义上就无意义**，硬判必然是 0 —— 首轮 10 道 null 全被记 0，
+> 把总分从 0.636 拖到 0.556。② **`run.error` 的题必须记 `None` 不是 0**（网关 429 打穿重试是基础设施
+> 失败，不是模型答错）。③ `evaluate(data=数据集名)` 会跑**整个数据集**，想跑子集必须显式传 example 列表。
+
+<!-- SCREENSHOTS -->
+
 ---
 
 ## 七、结论与已停止的方向

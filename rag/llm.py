@@ -19,6 +19,7 @@
 
 from __future__ import annotations
 
+import functools
 import json
 import os
 from functools import lru_cache
@@ -80,7 +81,15 @@ def resolve(model: str | None, role: str = "answer") -> tuple[str, str, str]:
 
 def _chat(cls, model: str | None, role: str) -> ChatOpenAI:
     """网关适配：RAG_USER_AGENT 绕 WAF（某些中转拦未知 UA）；
-    RAG_MAX_RETRIES / RAG_TIMEOUT 抵抗偶发 5xx / 超时（如 Cloudflare 524：源站 120s 没返回）。"""
+    RAG_MAX_RETRIES / RAG_TIMEOUT 抵抗偶发 5xx / 超时（如 Cloudflare 524：源站 120s 没返回）。
+
+    **RAG_RPS：进程级限流（每秒请求数），这是治 429 的正确工具。**
+    429 的含义是"你发太快了"，所以解法是**发慢点**，不是重试更狠 ——
+    实测中转网关在并发 3 下仍频繁 429，而任务级重试会把整题（含已成功的几次检索）
+    **全部重发**，反而制造更多负载、把限流推向恶性循环。
+    `InMemoryRateLimiter` 在**所有线程之间**共享一个令牌桶，从源头把速率压住。
+    缺省不开（`RAG_RPS` 未设 = 不限流），只有被网关限流时才需要。
+    """
     name, base, key = resolve(model, role)
     headers: dict[str, str] = {}
     ua = os.environ.get("RAG_USER_AGENT")
@@ -94,7 +103,21 @@ def _chat(cls, model: str | None, role: str) -> ChatOpenAI:
         max_retries=int(os.environ.get("RAG_MAX_RETRIES", "5")),
         timeout=float(os.environ.get("RAG_TIMEOUT", "180")),
         default_headers=headers or None,
+        rate_limiter=_rate_limiter(),
     )
+
+
+@functools.lru_cache(maxsize=1)
+def _rate_limiter():
+    """**全进程共享一个**令牌桶——必须 lru_cache，否则每个 ChatOpenAI 各限各的，等于没限。"""
+    rps = os.environ.get("RAG_RPS", "").strip()
+    if not rps:
+        return None
+    from langchain_core.rate_limiters import InMemoryRateLimiter
+    r = float(rps)
+    print(f"[限流] 全进程 {r} 请求/秒（RAG_RPS）", flush=True)
+    # max_bucket_size=1：不允许攒额度后突发——突发正是触发 429 的那一下。
+    return InMemoryRateLimiter(requests_per_second=r, check_every_n_seconds=0.1, max_bucket_size=1)
 
 
 def build_model(model: str | None = None) -> ChatOpenAI:
