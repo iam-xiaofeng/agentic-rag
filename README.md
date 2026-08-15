@@ -12,8 +12,7 @@
 
 ## 〇、八道题、八条完整链路（每种题型各一条真实记录）
 
-从主评测的逐题 dump 里，**每种题型各挑一道答得最好的**：裁判 `correct / grounded / sufficient` 全 1、
-引用句 100% 能在它自己检索到的上下文里原样找到、gold 证据 100% 交付。
+从主评测的逐题 dump 里，**每种题型各挑一道**。
 下面的 query 序列、每次检索**新落地的 gold**、引用句、答案、裁判理由**全部原样抄自 dump**，
 `example_id` 可 grep 回 `runs/dumps/final_musique_judged.jsonl` / `final_mhrag{,_judged}.jsonl` 复核。
 
