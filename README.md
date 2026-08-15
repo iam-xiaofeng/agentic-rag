@@ -10,6 +10,258 @@
 
 ---
 
+## 〇、八道题、八条完整链路（每种题型各一条真实记录）
+
+从主评测的逐题 dump 里，**每种题型各挑一道答得最好的**：裁判 `correct / grounded / sufficient` 全 1、
+引用句 100% 能在它自己检索到的上下文里原样找到、gold 证据 100% 交付。
+下面的 query 序列、每次检索**新落地的 gold**、引用句、答案、裁判理由**全部原样抄自 dump**，
+`example_id` 可 grep 回 `runs/dumps/final_musique_judged.jsonl` / `final_mhrag{,_judged}.jsonl` 复核。
+
+> 配置：`gpt-5.6-luna` / react / pool=50 / k=8 —— 与 §1 是**同一批运行**，不是单独跑的演示。
+> ⚠️ **这是最好的一档，不是平均水平**（平均在 §1.1：4hop 0.633、2hop 0.667）。
+> 看点也不在"答对了"，在**第 k 次 query 里出现的实体，只有第 k−1 次检索能给它** —— 这才是多跳的可证伪标志（§6.1）。
+
+**怎么读下面的数**：`累计召回 x/N` 是每次检索后 gold 证据的累计覆盖（dump 的 `curve` 字段，
+相邻两项之差 = 那一跳的边际贡献）；**第 1 次检索拿到的那部分就是单发检索的上限，剩下的是多跳挣来的**。
+
+### 〇.1 `1hop` · MuSiQue · 一次检索、一句引用
+
+```text
+Q     Who founded Australia's liberal party?
+gold  Robert Menzies
+
+↳ 检索 #1  query = "Australia's Liberal Party founded founder who founded Liberal Party of Australia"
+           top-8 → Liberal Party of Australia ×4 / History of Australia / Political party / …
+           ✔ 新落地 gold#1        累计召回 1/1
+
+引用   "The party's founder and longest-serving leader Robert Menzies envisaged that
+        Australia's middle class would form its main constituency."
+答案   Australia's Liberal Party was founded by **Robert Menzies**.
+裁判   correct 1 · grounded 1 · sufficient 1
+       "The answer matches the gold answer, is directly supported by the retrieved passage,
+        and the cited sentence fully establishes the answer."
+```
+
+`1 次检索 · 0.63 万字符 · 引用 1 句（100% 可回溯）· delivered 1/1` ｜ `example_id: 1hop__2hop__29368_29376`
+
+### 〇.2 `2hop` · MuSiQue · 桥接实体只能由上一跳给
+
+```text
+Q     Who does the author of Home: A Memoir of My Early Years play in Princess Diaries?
+gold  Queen dowager Clarisse Renaldi        （gold 链：memoir → Julie Andrews → 她演的角色）
+
+↳ 检索 #1  query = '"Home: A Memoir of My Early Years" author'
+           top-8 → Home: A Memoir of My Early Years / Home (Robinson novel) / …
+           ✔ 新落地 gold#1        累计召回 1/2
+↳ 检索 #2  query = 'Julie Andrews role in The Princess Diaries played'
+                     ^^^^^^^^^^^^ 这个名字只有 #1 能给 —— 原问句里没有
+           top-8 → The Princess Diaries (film) / Eloise at Christmastime / …
+           ✔ 新落地 gold#2        累计召回 2/2
+
+引用   "Home: A Memoir of My Early Years is a best-selling memoir written by Julie Andrews."
+       "It stars Anne Hathaway … ruled by her grandmother Queen dowager Clarisse Renaldi (Julie Andrews)."
+答案   Julie Andrews plays **Queen Dowager Clarisse Renaldi**, Mia Thermopolis's grandmother,
+       in *The Princess Diaries*. [source: The Princess Diaries (film)]
+裁判   correct 1 · grounded 1 · sufficient 1
+```
+
+`2 次检索 · 0.89 万字符 · 引用 2 句 · delivered 2/2 · 第 1 次检索只够到 1/2` ｜ `example_id: 2hop__761291_87295`
+
+### 〇.3 `3hop` · MuSiQue · 桥接实体连传两跳
+
+```text
+Q     Who is the owner of the record label of the performer of Groovy Little Summer Song?
+gold  Warner Music Group     （gold 链：歌 → James Otto → Warner Bros. → Warner Music Group）
+
+↳ 检索 #1  query = '"Groovy Little Summer Song" performer'
+           ✔ 新落地 gold#1        累计召回 1/3
+↳ 检索 #2  query = 'James Otto record label Shake What God Gave Ya label owner Warner Bros. Nashville'
+                     ^^^^^^^^^^ 来自 #1
+           ✔ 新落地 gold#2 gold#3  累计召回 3/3
+↳ 检索 #3  query = 'Warner Bros. Nashville owner parent company Warner Music Group'
+                     ^^^^^^^^^^^^^^^^^^^^ 来自 #2（复核母公司，无新增 gold）
+↳ 检索 #4  query = 'Warner Music Group owner owned by Access Industries'   （再往上追一层，无新增）
+
+引用   'Groovy Little Summer Song" is a song co-written recorded by American country music artist
+        James Otto.'   ← dump 原样（agent 抄证据时漏了左引号，`cited_grounded` 的宽松匹配放过了它）
+       "Shake What God Gave Ya … was released in the United States on September 14, 2010 through Warner Bros. Nashville."
+       "Warner Bros. Records Parent company Warner Music Group"
+答案   The owner/parent company of James Otto's record label is **Warner Music Group**. …
+       [source: Groovy Little Summer Song; Shake What God Gave Ya; Warner Records]
+裁判   correct 1 · grounded 1 · sufficient 1 —— "答案正确，所有信息均有出处，引用的三句话完整支撑答案。"
+```
+
+`4 次检索 · 1.83 万字符 · 引用 3 句 · delivered 3/3 · 第 1 次检索只够到 1/3` ｜ `example_id: 3hop1__285585_538202_84283`
+
+### 〇.4 `4hop` · MuSiQue · **每跳各拿一条 gold，累计召回逐跳爬满**
+
+```text
+Q     Who won more national championships between the university featuring Fort Hill and the
+      university of the state where Edwards won the primary besides the state where the
+      Richmond Braves moved?
+gold  University of South Carolina
+
+↳ 检索 #1  query = 'Fort Hill university campus university featuring Fort Hill'
+           top1 → Fort Hill (Clemson, South Carolina)      ✔ gold#3   累计 1/4   ← 拿到 Clemson
+↳ 检索 #2  query = 'Edwards won the primary state politician Edwards primary'
+           top1 → 2004 United States presidential election ✔ gold#2   累计 2/4   ← 拿到 South Carolina
+↳ 检索 #3  query = 'Richmond Braves moved to which state'
+           top1 → Richmond, Virginia                       ✔ gold#1   累计 3/4   ← 拿到 Georgia（用于排除）
+↳ 检索 #4  query = 'Clemson University national championships total'
+                     ^^^^^^^ 来自 #1
+           → Clemson–South Carolina rivalry                ✔ gold#4   累计 4/4
+↳ 检索 #5  query = 'University of South Carolina national championships Clemson University …'
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^ 来自 #2，与 #1 的 Clemson 并列复核（无新增）
+
+引用   "Fort Hill … is a National Historic Landmark on the Clemson University campus in Clemson, South Carolina."
+       "The following week, John Edwards won the South Carolina primary …"
+       "… the city was home to the Richmond Braves … until the franchise relocated to Georgia."
+       "College comparison Clemson University University of South Carolina … National Championships 5 10"
+答案   The **University of South Carolina** won more national championships—**10**, compared with
+       **Clemson University's 5**. … [source: Clemson–South Carolina rivalry]
+裁判   correct 1 · grounded 1 · sufficient 1
+```
+
+`5 次检索 · 3.06 万字符 · 引用 4 句 · delivered 4/4 · 第 1 次检索只够到 1/4（0.25 → 0.50 → 0.75 → 1.00 逐跳爬满）`
+｜ `example_id: 4hop3__39836_29339_508306_70744`
+
+### 〇.5 `comparison` · MultiHop-RAG · 两篇文章各取一条，答的是**差别在哪**
+
+```text
+Q     Does the Fortune article claim that SBF used Caroline Ellison as a front for secret access to
+      customer funds at Alameda, while the TechCrunch article alleges that Ellison took $14 billion
+      from customers to repay debts under SBF's instruction, or do both articles assert the same
+      involvement …?
+gold  Yes
+
+↳ 检索 #1  query = 'Fortune article Sam Bankman-Fried Caroline Ellison front secret access customer funds Alameda Research'
+           top1 → "Is Sam Bankman-Fried a bad 'man' or a good 'boy'? …"    ✔ gold#1   累计 1/2
+↳ 检索 #2  query = 'TechCrunch article Caroline Ellison 14 billion customers repay debts Sam Bankman-Fried instruction'
+           top1 → "SBF Trial: The latest updates from the FTX collapse's courtroom drama"  ✔ gold#2  累计 2/2
+↳ 检索 #3/#4  带引号回查原文（"Using Caroline Ellison" / "took $14 billion"）—— 无新增 gold，是**自我复核**
+
+引用   "Using Caroline Ellison … as a front, Bankman-Fried had "secret access" to customer money …"
+       "… Caroline Ellison, who claimed she took $14 billion from customers to repay debts to lenders …
+        under the instruction of SBF."
+答案   They describe **different aspects of the same alleged misuse**: … Thus, both implicate
+       Bankman-Fried, but they do not make the identical claim: Fortune emphasizes the access
+       mechanism, whereas TechCrunch emphasizes the transaction and his alleged direction.
+裁判   correct 1 · grounded 1 · sufficient 1
+```
+
+`4 次检索 · 1.95 万字符 · 引用 2 句 · delivered 2/2` ｜ `example_id: local-1925`
+
+### 〇.6 `inference` · MultiHop-RAG · 四家媒体的四条线索汇到同一个主语
+
+```text
+Q     Which institution … is recognized for its influence on global financial markets, recently raised
+      its main interest rate to a level not seen since 2001, and is basing future rate decisions on
+      economic data while combating inflation that followed a period of booming home prices?
+gold  Federal Reserve      （四条 gold 证据分散在 The Age / SMH / Fortune 的四篇里）
+
+↳ 检索 #1  'The Age Sydney Morning Herald Fortune institution influence on global financial markets
+            main interest rate highest level since 2001 economic data inflation booming home prices'
+                                                              ✔ gold#1   累计 1/4
+↳ 检索 #2  'site:theage.com.au Federal Reserve booming home prices inflation data interest rates 2001'
+                                                              ✔ gold#3   累计 2/4
+↳ 检索 #3  'site:smh.com.au Federal Reserve booming home prices inflation data interest rates 2001'
+↳ 检索 #4  'site:fortune.com Federal Reserve global financial markets influence data dependent …'
+                                                              累计 2/4（两次都没有新证据）
+↳ 检索 #5  'Federal Reserve influence global financial markets institution reports The Age
+            Sydney Morning Herald Fortune'                    ✔ gold#2   累计 3/4
+↳ 检索 #6  'Federal Reserve future interest rate decisions dependent on economic data inflation
+            housing boom home prices'                         ✔ gold#4   累计 4/4
+
+引用   "…the "Fed matters more than other central banks," … BofA Global Research report"
+       "The Fed's main interest rate is at its highest level since 2001 …"
+       "…the Fed, which has insisted it will make upcoming decisions on interest rates based on
+        what incoming data say about the economy."
+       "Back then, just like today, home prices had boomed for years before Fed officials were
+        ultimately forced to hike interest rates aggressively …"
+答案   The institution is the **U.S. Federal Reserve (the Fed)**. …
+裁判   correct 1 · grounded 1 · sufficient 1
+```
+
+`6 次检索 · 3.30 万字符 · 引用 4 句 · delivered 4/4 · 第 1 次检索只够到 1/4` ｜ `example_id: local-1962`
+
+> ⚠️ **连最好的一条里也有浪费**：#2–#4 用了 `site:` 这种**网页搜索的写法**，而这是个本地向量库、
+> 根本不认这个语法 —— 三次里只有一次带来新证据。这类空转正是 §1.1 里 `n_search` / 字符成本的来源之一，
+> 也是"agent 自主控制流"要付的真实代价。
+
+### 〇.7 `temporal` · MultiHop-RAG · 按时间顺序串三篇报道
+
+```text
+Q     After the CBSSports.com report (2023-10-12) on Taylor Swift at Arrowhead Stadium, and the
+      Independent report (2023-11-25) on Travis Kelce's invitation, was the news about their
+      relationship consistent with the later Independent report (2023-12-06)?
+gold  Yes
+
+↳ 检索 #1  'CBSSports.com October 12 2023 Taylor Swift activities Arrowhead Stadium Travis Kelce
+            relationship'                                     ✔ gold#2   累计 1/3
+↳ 检索 #2  'The Independent Life and Style November 25 2023 Travis Kelce invitation Taylor Swift'
+                                                              ✔ gold#1   累计 2/3
+↳ 检索 #3  'The Independent Life and Style December 6 2023 Taylor Swift Travis Kelce relationship'
+↳ 检索 #4  'CBSSports.com October 12 2023 Taylor Swift Arrowhead Stadium report'
+↳ 检索 #5  '"December 6, 2023" "The Independent" "Taylor Swift" "Travis Kelce" relationship'
+                                                              累计 2/3（三次换写法都没够到 12-06 那条）
+↳ 检索 #6  'site:independent.co.uk/life-style Taylor Swift Travis Kelce December 6 2023 relationship'
+                                                              ✔ gold#3   累计 3/3
+↳ 检索 #7  'The Independent Life Style December 6 Taylor Swift Travis Kelce dating couple report'
+                                                              （复核，无新增）
+
+引用   "On his podcast, he later invited the "Anti-Hero" singer to one of his games at Arrowhead
+        Stadium - an invitation she famously accepted on 24 September."
+       "Oct. 12: Swift attends Chiefs-Broncos"
+       "By the time I went to that first game, we were a couple."
+答案   Yes. The reports were consistent: Kelce invited Swift to an Arrowhead game, she accepted and
+       attended, and the later report stated that they were already dating when she first attended
+       his game. … The chain is: Kelce's invitation → Swift's Arrowhead attendance → later
+       confirmation that they were already a couple.
+裁判   correct 1 · grounded 1 · sufficient 1
+```
+
+`7 次检索 · 3.62 万字符 · 引用 3 句 · delivered 3/3 · 第 1 次检索只够到 1/3` ｜ `example_id: local-1556`
+
+### 〇.8 `null`（不可答）· MultiHop-RAG · **查了 7 次，然后说"查不到"**
+
+不可答题没有 gold，`correct` 对它在定义上无意义（§6.1 的坑①）。这里"答得最好"= **一次干净的拒答**：
+不给候选、不编引用，还**逐条点名**哪个链接没被支持。
+
+```text
+Q     … which single letter represents both the start of the name of the Mastercard CEO who
+      commented on the earnings report and the first letter of the company that Mastercard has
+      entered into a new partnership with as mentioned in the Bloomberg article?
+gold  Insufficient information.（语料里根本没有这两篇）
+
+↳ 检索 #1  'CNBC Mastercard financial performance last quarter CEO commented on earnings report …'
+↳ 检索 #2  'site:cnbc.com Mastercard quarterly earnings CEO comments Mastercard CEO 2024 revenue …'
+↳ 检索 #3  'Bloomberg Mastercard new partnership announced this year Mastercard partnership company …'
+↳ 检索 #4  'Mastercard CEO said earnings report last quarter CNBC Michael Miebach quarterly results'
+                                                      ^^^^^^^^^^^^^^^ ← 这个名字**不在任何检索结果里**，
+                                                      是模型自己的参数化知识；它把它当**探针**去查证，没查到
+↳ 检索 #5  'Mastercard Bloomberg "new partnership" company announced 2024'
+↳ 检索 #6  'Bloomberg Mastercard partnership announced this year Mastercard partner company'
+↳ 检索 #7  'CNBC Mastercard earnings "CEO" "last quarter" Mastercard'
+           7 次全部落空 —— 没有一条能钉住"CEO 名字"或"新合作方"
+
+引用   （0 句 —— 没抄到就一句不写）
+自曝   unsupported: ×2   ← agent 主动声明两个环节没有依据（prompts.py v3 的 escape hatch）
+答案   I could not reliably determine the letter: the retrieved snippets do not identify the
+       CNBC article's CEO or the Bloomberg article's new partner.
+三分类 refused（不给候选）—— 见 §1.3：30 道 null 里 17 拒答 + 13 自曝存疑，**无免责断言 0/30**
+```
+
+`7 次检索 · 3.86 万字符 · 引用 0 句 · 自认没依据 2 环` ｜ `example_id: local-1114`
+
+> **最值得看的是 #4**：模型脑子里有"Mastercard CEO = Michael Miebach"，但它没把这条参数化知识
+> 写进答案，而是**发成一次检索去查证** —— 查不到，于是答案里一个字都不提。
+> §1.4 里那条「不给检索、凭参数化知识答」的地板是 0.244，这道题演的就是**那 0.244 没有漏进答案**。
+>
+> 这也是整套评测里**最贵**的行为（null 平均 6.6 次检索 / 3.42 万字符，见 §1.1）——
+> **"知道自己不知道"是要花钱买的**，而二值的"拒答率"会把这笔钱和它买到的东西一起记成失败。
+
+---
+
 ## 一、结果
 
 `gpt-5.6-luna` / react / **pool=50 / k=8**，8 种题型、同一套系统、同一个裁判。
@@ -198,9 +450,24 @@ reranker 只在 k 紧时值钱、pool 开大是负收益、融合权重和算法
 python scripts/fetch_data.py          # MuSiQue 走 HF 缓存；MultiHop-RAG 下到 data/
 ```
 
-**MuSiQue（默认）**：validation 全部候选段落去重 **21100 段**（**含官方干扰项**——
-只放 gold 等于把检索题变成阅读题）、**2417 题**（2/3/4hop）。
+**MuSiQue（默认）**：HF `dgslibisey/MuSiQue` 的 validation，全部候选段落去重 **21100 段**
+（**含官方干扰项**——只放 gold 等于把检索题变成阅读题）、**2417 题**（2/3/4hop）。段落本身就是检索单元，**不切块**。
 **1hop** 由每题第 1 步派生（同语料、同检索器、gold 段精确），作难度轴的下端锚点。
+
+**MultiHop-RAG**：HF `yixuantt/MultiHopRAG` 的 `corpus.json`（609 篇新闻）+ `MultiHopRAG.json`（2556 题），
+下到 `data/`；新闻是整篇，按 600/150 递归切块 → **15172 个片段**（切块参数见 §2.5）。
+
+**这些数据分别存在哪**（三份东西，三个地方）：
+
+| | 存哪 | 生命周期 |
+|---|---|---|
+| 题目 / gold 答案 / gold 证据 | **不入库**：MuSiQue 现读 HF 缓存，MultiHop-RAG 现读 `data/*.json` | 每次进程启动重新加载 |
+| 稠密向量（bge） | **Chroma，持久化在 `.cache/chroma/`** | 建一次复用 |
+| BM25 倒排 | **不入 Chroma**：`rank_bm25` 进程内建索引 | 每次启动重建（语料小，秒级） |
+
+Chroma 集合按 **(模型, 语料指纹)** 命名，所以两个语料**各占一个集合、互不混用**：
+MuSiQue → `dense_b15f855b945b`（21100 条）、MultiHop-RAG(600/150) → `dense_6d3c935f8e12`（15172 条）；
+`.cache/chroma/` 里其余集合是历次**切块参数扫描 / 换语料实验**留下的旧配置。编码结果另按 `.npy` 缓存，重建集合时免重算。
 
 ### 3.2 换数据集之前先跑探针
 
